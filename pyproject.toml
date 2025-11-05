@@ -1,0 +1,52 @@
+[project]
+name = "Basic-Template"
+version = "0.1.0"
+description = "A Template for Deep Learning"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pre-commit>=4.3.0",
+    "ruff>=0.14.1",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.14.1",
+]
+
+
+# Ruff Format Settings   ---- should be fixed with bluejun0901.
+[tool.ruff]
+# Exclude files
+exclude = [
+    ".venv",
+    "data",
+    "notebooks",
+    "__pycache__"
+]
+
+line-length = 120      # Maximum chars in one line
+
+# Ruff Linter
+[tool.ruff.lint]
+# Rules : 
+# * E, W : Error, Warnings
+# * F : Logical Error
+# * I : Import Sort
+select = ["E", "W", "F", "I"]
+ignore = []
+
+fixable = ["ALL"]
+unfixable = []
+
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+
+[tool.ruff.lint.per-file-ignores]
+"**/__init__.py" = ["F401", "F403"]
+"**/**/__init__.py" = ["F401", "F403"]

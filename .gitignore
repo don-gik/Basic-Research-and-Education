@@ -1,0 +1,14 @@
+data/
+runs/
+**/__pycache__/
+*.py[cod]
+vocab/
+.vscode/
+
+.venv
+
+.ruff_cache
+
+*.log
+
+uv.lock

@@ -1,0 +1,14 @@
+fail_fast: true
+
+repos:
+- repo: https://github.com/astral-sh/ruff-pre-commit
+  rev: "v0.14.1"
+  hooks:
+    - id: ruff-check       # no --fix so it fails on lint errors
+    - id: ruff-format
+
+- repo: https://github.com/astral-sh/uv-pre-commit
+  rev: 0.9.5
+  hooks:
+    - id: uv-export
+      args: ["--format", "requirements-txt", "--all-groups", "--output-file", "requirements.txt"]
