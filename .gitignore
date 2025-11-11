@@ -1,14 +1,16 @@
-data/
-runs/
+/data/
+/runs/
 **/__pycache__/
 *.py[cod]
-vocab/
-.vscode/
 
-.venv
+/.vscode/
 
-.ruff_cache
+/.venv
+
+/.ruff_cache
 
 *.log
 
 uv.lock
+
+/notebooks/

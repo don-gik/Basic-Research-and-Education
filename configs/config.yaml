@@ -1,0 +1,28 @@
+model:
+  time: 8
+  patch_size: 4
+  depth: 6
+
+  name: "model1"
+
+data:
+  var_cnt: 10
+  H: 40
+  W: 200
+
+  path: "./data/processed/monthly_tensor.pt"
+
+train:
+  val_size: 64
+  batch_size: 4
+  subset_size: 512
+
+  load: "./model/2025-11-25/"
+  save: "./model/2025-11-25/"
+
+  epochs: 100
+
+  log_freq: 10
+
+args:
+  preprocess: true

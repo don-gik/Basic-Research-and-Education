@@ -5,8 +5,20 @@ description = "A Template for Deep Learning"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "cfgrib>=0.9.15.1",
+    "dask>=2025.11.0",
+    "eccodes>=2.44.0",
+    "einops>=0.8.1",
+    "hydra-core>=1.3.2",
+    "netcdf4>=1.7.3",
+    "numpy>=2.3.4",
+    "omegaconf>=2.3.0",
     "pre-commit>=4.3.0",
     "ruff>=0.14.1",
+    "torch>=2.9.0",
+    "torchsummary>=1.5.1",
+    "tqdm>=4.67.1",
+    "xarray>=2025.10.1",
 ]
 
 [dependency-groups]
