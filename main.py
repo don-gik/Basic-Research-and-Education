@@ -1,6 +1,5 @@
 # Must be coded in future for easily testing and training.
 import argparse
-import json
 
 # import subprocess
 import logging
@@ -10,13 +9,12 @@ import os
 from pathlib import Path
 
 import hydra
-import torch
 import pandas as pd
+import torch
 
-from src.train import Trainer
 from src.dataset import SequentialDataset
 from src.preprocess import discover_grib_variables, save_normalized_tensor
-
+from src.train import Trainer
 
 config_path = ""
 config_name = ""
@@ -44,25 +42,30 @@ def run():
         TENSOR_PATH = Path("./data/processed/monthly_tensor.pt")
         STATS_PATH = Path("./data/processed/monthly_tensor_stats.json")
 
-        if(os.path.exists(TENSOR_PATH)):
+        if os.path.exists(TENSOR_PATH):
             logger.warning("Tensor path exists. Automatically skipping preprocess...")
 
         else:
             CHANNEL_SHORT_NAMES = {
-                "u100" : "100u",
-                "v100" : "100v",
-                "u10"  : "10u",
-                "v10"  : "10v",
-                "d2m"  : "2d",
-                "t2m"  : "2t",
-                "msl"  : "msl",
-                "sp"   : "sp",
-                "ssrc" : "ssrc",
-                "sst"  : "sst"
+                "u100": "100u",
+                "v100": "100v",
+                "u10": "10u",
+                "v10": "10v",
+                "d2m": "2d",
+                "t2m": "2t",
+                "msl": "msl",
+                "sp": "sp",
+                "ssrc": "ssrc",
+                "sst": "sst",
             }
-            
+
             metadata = discover_grib_variables(GRIB_PATH)
-            logger.info(pd.DataFrame(metadata).drop_duplicates(subset=["short_name"]).sort_values("short_name").reset_index(drop=True))
+            logger.info(
+                pd.DataFrame(metadata)
+                .drop_duplicates(subset=["short_name"])
+                .sort_values("short_name")
+                .reset_index(drop=True)
+            )
 
             tensor = save_normalized_tensor(
                 GRIB_PATH,
@@ -70,12 +73,16 @@ def run():
                 TENSOR_PATH,
                 STATS_PATH,
             )
-            logger.info(f'Tensor shape : {tensor.shape}')
-    
+            logger.info(f"Tensor shape : {tensor.shape}")
+
     data = torch.load(config.data.path)
-    logger.info(f'Data shape : {data.shape}')
+    logger.info(f"Data shape : {data.shape}")
     dataset = SequentialDataset(config.model.time, data, config.data.H, config.data.W)
-    trainer = Trainer(config=config, device=torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"), dataset=dataset)
+    trainer = Trainer(
+        config=config,
+        device=torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"),
+        dataset=dataset,
+    )
 
     trainer.run()
 

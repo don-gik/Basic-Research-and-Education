@@ -1,19 +1,16 @@
-from src.model import Model
-
 import logging
 import os
 from abc import ABC, abstractmethod
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, SubsetRandomSampler, random_split, Dataset
-
+from omegaconf import DictConfig, ListConfig
+from torch.utils.data import DataLoader, SubsetRandomSampler, random_split
 from tqdm import tqdm
 
-import numpy as np
-
-from omegaconf import DictConfig, ListConfig
+from src.model import Model
 
 
 class BaseTrainer(ABC):
@@ -24,12 +21,12 @@ class BaseTrainer(ABC):
 class Trainer(BaseTrainer):
     def __init__(self, config: DictConfig | ListConfig, dataset, device: torch.device = torch.device("cpu")):
         self.model = Model(
-            in_channels = config.data.var_cnt,
-            patch_size = config.model.patch_size,
+            in_channels=config.data.var_cnt,
+            patch_size=config.model.patch_size,
             time=config.model.time,
             img_H=config.data.H,
             img_W=config.data.W,
-            depth=config.model.depth
+            depth=config.model.depth,
         ).to(device)
 
         self.full_dataset = dataset
@@ -54,8 +51,8 @@ class Trainer(BaseTrainer):
     def run(self) -> None:
         try:
             self.model.load_state_dict(torch.load(self.load, weights_only=True))
-        except:
-            self.logger.warning("Skipping to load model...")
+        except FileNotFoundError as e:
+            self.logger.warning(f"Skipping to load model... {e}")
 
         criterion = nn.MSELoss()
         optimizer = optim.AdamW(self.model.parameters(), lr=1e-4)
@@ -76,13 +73,15 @@ class Trainer(BaseTrainer):
             self.logger.info(f"Starting epoch {epoch}...")
             running_loss: float = 0.0
 
-            random_indices: list[int] = np.random.choice(np.arange(dataset_size), size=subset_size, replace=False).tolist()
+            random_indices: list[int] = np.random.choice(
+                np.arange(dataset_size), size=subset_size, replace=False
+            ).tolist()
             random_sampler = SubsetRandomSampler(random_indices)
             loader = DataLoader(
                 self.dataset,
                 batch_size=self.batch_size,
                 sampler=random_sampler,
-                num_workers=2,               # Adjust num_workers as needed
+                num_workers=2,  # Adjust num_workers as needed
             )
 
             loaderbar = tqdm(
@@ -90,7 +89,7 @@ class Trainer(BaseTrainer):
                 desc="Batches",
                 mininterval=0.1,
                 file=open(os.devnull, "w"),
-                total=subset_size // self.batch_size
+                total=subset_size // self.batch_size,
             )
 
             for i, data in loaderbar:
@@ -114,18 +113,14 @@ class Trainer(BaseTrainer):
                     self.logger.info("{}  batch {} loss: {}".format(str(loaderbar), i + 1, last_loss))
 
                     running_loss = 0.0
-            
+
             self.evaluate()
 
             self._save(epoch, self.name)
-    
+
     def evaluate(self):
         val_criterion = nn.MSELoss()
-        loader = DataLoader(
-            self.validation,
-            batch_size=self.batch_size,
-            num_workers=2
-        )
+        loader = DataLoader(self.validation, batch_size=self.batch_size, num_workers=2)
         loaderbar = tqdm(
             enumerate(loader),
             desc="Batches",
@@ -134,7 +129,7 @@ class Trainer(BaseTrainer):
         )
 
         with torch.no_grad():
-            full_loss = 0.
+            full_loss = 0.0
             for i, batch in loaderbar:
                 inputs, outputs = batch
                 inputs = inputs.to(self.device)
@@ -146,11 +141,12 @@ class Trainer(BaseTrainer):
 
                 val_loss = val_criterion(pred.transpose(1, 2), outputs)
                 full_loss += val_loss
-            
+
                 if i % self.log_freq == self.log_freq - 1:
                     self.logger.info("{}  {} loss : {}".format(str(loaderbar), i, full_loss / i / self.batch_size))
 
     def _save(self, epoch: int, name: str) -> None:
-        if not os.path.exists(self.path): os.makedirs(self.path)
+        if not os.path.exists(self.path):
+            os.makedirs(self.path)
         torch.save(self.model.state_dict(), os.path.join(self.path, name, "+" + str(epoch) + ".pt"))
         return

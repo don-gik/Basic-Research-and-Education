@@ -1,4 +1,3 @@
-import torch
 from torch import Tensor
 from torch.utils.data import Dataset
 
@@ -16,7 +15,7 @@ class SequentialDataset(Dataset[float]):
         return self.x.shape[1] - self.length
 
     def __getitem__(self, idx: int):  # type: ignore
-        x = self.x[:, idx : idx + self.length, :self.h, :self.w]
-        y = self.x[:, idx + 1 : idx + self.length + 1, :self.h, :self.w]
+        x = self.x[:, idx : idx + self.length, : self.h, : self.w]
+        y = self.x[:, idx + 1 : idx + self.length + 1, : self.h, : self.w]
 
         return x, y

@@ -3,9 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Mapping
-import pandas as pd
 
 import numpy as np
+import pandas as pd
 import torch
 import xarray as xr
 
@@ -76,9 +76,7 @@ def normalize_arrays_to_tensor(
         if reference_shape is None:
             reference_shape = arr.shape
         elif arr.shape != reference_shape:
-            raise ValueError(
-                f"Channel '{alias}' shape {arr.shape} does not match {reference_shape}"
-            )
+            raise ValueError(f"Channel '{alias}' shape {arr.shape} does not match {reference_shape}")
 
         mean = float(arr.mean())
         std = float(arr.std())
@@ -110,13 +108,8 @@ def save_normalized_tensor(
     eps: float = 1e-6,
 ) -> torch.Tensor:
     """Load GRIB variables, normalize, and persist as tensor + stats JSON."""
-    arrays = {
-        alias: _load_short_name_array(grib_path, short_name)
-        for alias, short_name in channel_short_names.items()
-    }
-    return normalize_arrays_to_tensor(
-        arrays, channel_short_names, tensor_path, stats_path, eps=eps
-    )
+    arrays = {alias: _load_short_name_array(grib_path, short_name) for alias, short_name in channel_short_names.items()}
+    return normalize_arrays_to_tensor(arrays, channel_short_names, tensor_path, stats_path, eps=eps)
 
 
 if __name__ == "__main__":
@@ -132,9 +125,11 @@ if __name__ == "__main__":
         "msl": "msl",
         "sst": "sst",
     }
-    
+
     metadata = discover_grib_variables(GRIB_PATH)
-    print(pd.DataFrame(metadata).drop_duplicates(subset=["short_name"]).sort_values("short_name").reset_index(drop=True))
+    print(
+        pd.DataFrame(metadata).drop_duplicates(subset=["short_name"]).sort_values("short_name").reset_index(drop=True)
+    )
 
     tensor = save_normalized_tensor(
         GRIB_PATH,
