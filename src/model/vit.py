@@ -19,7 +19,7 @@ class ResidualAdd(nn.Module):
 
 
 class FeedForward(nn.Sequential):
-    def __init__(self, embed_size: int, expansion: int = 4, dropout: float = 0.0) -> None:
+    def __init__(self, embed_size: int, expansion: int = 2, dropout: float = 0.5) -> None:
         super().__init__(
             nn.Linear(embed_size, expansion * embed_size),
             nn.GELU(),
@@ -126,7 +126,7 @@ class SelfAttention(nn.Module):
 
 class TransformerBlock(nn.Sequential):
     def __init__(
-        self, embed_size: int, dropout: float = 0.0, expansion: int = 4, forward_dropout: float = 0.0, **kwargs
+        self, embed_size: int, dropout: float = 0.5, expansion: int = 2, forward_dropout: float = 0.5, **kwargs
     ) -> None:
         super().__init__(
             ResidualAdd(
@@ -145,6 +145,18 @@ class Encoder(nn.Sequential):
         super().__init__(*[TransformerBlock(**kwargs) for _ in range(depth)])
 
 
+class DWSeparable(nn.Module):
+    def __init__(self, ch: int):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(ch, ch, 3, padding=1, groups=ch),
+            nn.GELU(),
+            nn.Conv2d(ch, ch, 1),
+        )
+        self.act = nn.GELU()
+    def forward(self, x):
+        return self.act(x + self.block(x))
+
 class Decoder(nn.Sequential):
     def __init__(self, in_channels: int, patch_size: int, img_H: int, img_W: int, time: int) -> None:
         super().__init__(
@@ -155,11 +167,13 @@ class Decoder(nn.Sequential):
                 kernel_size=patch_size,
                 stride=patch_size,
             ),
+            DWSeparable(in_channels),
+            DWSeparable(in_channels),
             Rearrange("b (c t) h w -> b c t h w", t=time),
         )
 
 
-class Model(nn.Sequential):
+class Model(nn.Module):
     """
     Basic model using ViT as a base model
     It enables the full network to catch details,
@@ -176,13 +190,17 @@ class Model(nn.Sequential):
         depth: int,
         **kwargs,
     ) -> None:
-        super().__init__(
+        super().__init__()
+
+        self.layer = nn.Sequential(
             TimeEncoding(time=time, img_H=img_H, img_W=img_W),
             PatchEmbedding(in_channels=in_channels * time, patch_size=patch_size, img_H=img_H, img_W=img_W),
             Encoder(depth, embed_size=in_channels * (patch_size) ** 2 * time, **kwargs),
             Decoder(in_channels=in_channels * time, patch_size=patch_size, img_H=img_H, img_W=img_W, time=time),
         )
 
+    def forward(self, x: Tensor):
+        return x + self.layer(x)
 
 if __name__ == "__main__":
     model: nn.Module = Model(in_channels=9, patch_size=4, time=8, img_H=40, img_W=200, depth=6)

@@ -1,9 +1,9 @@
 model:
   time: 8
   patch_size: 4
-  depth: 6
+  depth: 4
 
-  name: "model1"
+  name: "model-"
 
 data:
   var_cnt: 10
@@ -14,15 +14,17 @@ data:
 
 train:
   val_size: 64
-  batch_size: 4
+  batch_size: 16
   subset_size: 512
 
   load: "./model/2025-11-25/"
   save: "./model/2025-11-25/"
 
-  epochs: 100
+  epochs: 50
 
-  log_freq: 10
+  log_freq: 2
 
 args:
   preprocess: true
+
+seed: 23489

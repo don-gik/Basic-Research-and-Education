@@ -63,7 +63,7 @@ class Trainer(BaseTrainer):
         dataset_size = len(self.dataset)
         subset_size = self.subset_size
 
-        self.logger.info("-------- Starting training... --------")
+        self.logger.info("-------- Starting Evaluating... --------")
 
         epochbar = tqdm(
             range(self.epochs),
@@ -72,54 +72,7 @@ class Trainer(BaseTrainer):
             file=open(os.devnull, "w"),
         )
 
-        for epoch in epochbar:
-            self.logger.info(f"Starting epoch {epoch}...")
-            running_loss: float = 0.0
-
-            random_indices: list[int] = np.random.choice(
-                np.arange(dataset_size), size=subset_size, replace=False
-            ).tolist()
-            random_sampler = SubsetRandomSampler(random_indices)
-            loader = DataLoader(
-                self.dataset,
-                batch_size=self.batch_size,
-                sampler=random_sampler,
-                num_workers=2,  # Adjust num_workers as needed
-            )
-
-            loaderbar = tqdm(
-                enumerate(loader),
-                desc="Batches",
-                mininterval=0.1,
-                file=open(os.devnull, "w"),
-                total=subset_size // self.batch_size,
-            )
-
-            for i, data in loaderbar:
-                inputs, outputs = data
-                inputs = inputs.to(self.device)
-                outputs = outputs.to(self.device, dtype=torch.float)
-
-                optimizer.zero_grad()
-
-                pred = self.model(inputs)
-
-                loss = criterion(pred, outputs)
-                loss.backward()
-
-                optimizer.step()  # type: ignore
-
-                running_loss += loss.item()  # type: ignore
-
-                if i % self.log_freq == self.log_freq - 1:
-                    last_loss = running_loss / self.log_freq  # loss per batch
-                    self.logger.info("{}  batch {} loss: {}".format(str(loaderbar), i + 1, last_loss))
-
-                    running_loss = 0.0
-
-            self.evaluate()
-
-            self._save(epoch, self.name)
+        self.evaluate()
 
     def evaluate(self):
         val_criterion = nn.MSELoss()
