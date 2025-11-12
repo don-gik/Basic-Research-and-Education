@@ -17,8 +17,8 @@ train:
   batch_size: 32
   subset_size: 4096
 
-  load: "./model/2025-11-25/"
-  save: "./model/2025-11-25/"
+  load: "./model/2025-11-25/model-49.pt"
+  save: "./model/2025-11-12/"
 
   epochs: 50
 
