@@ -28,6 +28,8 @@ train:
 
 args:
   preprocess: true
+  evaluate: false
+  delete_logs: true
 
 seed: 23489
 

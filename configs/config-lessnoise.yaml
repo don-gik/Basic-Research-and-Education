@@ -10,6 +10,8 @@ data:
   H: 40
   W: 200
 
+  augment: 32
+
   path: "./data/processed/monthly_tensor.pt"
 
 train:
@@ -26,5 +28,7 @@ train:
 
 args:
   preprocess: true
+  evaluate: false
+  delete_logs: true
 
 seed: 23489

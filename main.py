@@ -27,6 +27,16 @@ LOGGING_CONFIG = "logging.conf"
 
 @hydra.main(config_path="configs", version_base=None)
 def run(config):
+    if config.args.delete_logs:
+        if os.path.exists("debug.log"):
+            os.remove("debug.log")
+        if os.path.exists("error.log"):
+            os.remove("error.log")
+
+    if config.args.evaluate:
+        eval_run(config)
+        sys.exit(0)
+
     logging.config.fileConfig("logging.conf")  # type: ignore
 
     logger = logging.getLogger(__name__)
@@ -34,10 +44,6 @@ def run(config):
 
     logger.info("-------- Starting the program --------")
     logger.info(f"Using config path : {config_path} / {config_name}")
-
-    # Load config file
-    hydra.initialize(config_path=config_path, version_base=None)
-    config = hydra.compose(config_name=config_name)
 
     if config.args.preprocess:
         logger.info("-------- Starting preprocess --------")
@@ -90,10 +96,10 @@ def run(config):
     val_set = Subset(dataset, val_idx)
 
     train_augmented_dataset = AugmentedDataset(
-        base_dataset=train_set, n_augment=config.augment, noise_std=0.05, noise_on_inputs=True
+        base_dataset=train_set, n_augment=config.data.augment, noise_std=0.05, noise_on_inputs=True
     )
     val_augmented_dataset = AugmentedDataset(
-        base_dataset=val_set, n_augment=config.augment, noise_std=0.05, noise_on_inputs=True
+        base_dataset=val_set, n_augment=config.data.augment, noise_std=0.05, noise_on_inputs=True
     )
     trainer = Trainer(
         config=config,
@@ -105,7 +111,7 @@ def run(config):
     trainer.run()
 
 
-def eval_run():
+def eval_run(config):
     logging.config.fileConfig("logging.conf")  # type: ignore
 
     logger = logging.getLogger(__name__)
@@ -113,10 +119,6 @@ def eval_run():
 
     logger.info("-------- Starting the program --------")
     logger.info(f"Using config path : {config_path} / {config_name}")
-
-    # Load config file
-    hydra.initialize(config_path=config_path, version_base=None)
-    config = hydra.compose(config_name=config_name)
 
     data = torch.load(config.data.path)
     logger.info(f"Data shape : {data.shape}")
@@ -128,10 +130,10 @@ def eval_run():
     val_set = Subset(dataset, val_idx)
 
     train_augmented_dataset = AugmentedDataset(
-        base_dataset=train_set, n_augment=config.augment, noise_std=0.05, noise_on_inputs=True
+        base_dataset=train_set, n_augment=config.data.augment, noise_std=0.05, noise_on_inputs=True
     )
     val_augmented_dataset = AugmentedDataset(
-        base_dataset=val_set, n_augment=config.augment, noise_std=0.05, noise_on_inputs=True
+        base_dataset=val_set, n_augment=config.data.augment, noise_std=0.05, noise_on_inputs=True
     )
     evaluator = Evaluator(
         config.model,
@@ -143,19 +145,4 @@ def eval_run():
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--delete-logs", "-dl", dest="delete_logs", action="store_true")
-    parser.add_argument("--evaluate", "-e", dest="evaluate", action="store_true")
-
-    args = parser.parse_args()
-    if args.delete_logs:
-        if os.path.exists("debug.log"):
-            os.remove("debug.log")
-        if os.path.exists("error.log"):
-            os.remove("error.log")
-
-    if args.evaluate:
-        eval_run()
-        sys.exit(0)
-
     run()
