@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from omegaconf import DictConfig, ListConfig
-from torch.utils.data import DataLoader, SubsetRandomSampler, random_split
+from torch.utils.data import DataLoader, SubsetRandomSampler
 from tqdm import tqdm
 
 from src.model import Model
@@ -19,7 +19,9 @@ class BaseTrainer(ABC):
 
 
 class Trainer(BaseTrainer):
-    def __init__(self, config: DictConfig | ListConfig, dataset, device: torch.device = torch.device("cpu")):
+    def __init__(
+        self, config: DictConfig | ListConfig, train_dataset, val_dataset, device: torch.device = torch.device("cpu")
+    ):
         self.model = Model(
             in_channels=config.data.var_cnt,
             patch_size=config.model.patch_size,
@@ -29,12 +31,8 @@ class Trainer(BaseTrainer):
             depth=config.model.depth,
         ).to(device)
 
-        self.full_dataset = dataset
-        g = torch.Generator().manual_seed(config.seed)
-        train_size = int(len(self.full_dataset) - config.train.val_size)
-        val_size = len(self.full_dataset) - train_size
-
-        self.dataset, self.validation = random_split(self.full_dataset, [train_size, val_size], generator=g)
+        self.dataset = train_dataset
+        self.validation = val_dataset
 
         self.logger = logging.getLogger(__name__)
 
@@ -142,15 +140,17 @@ class Trainer(BaseTrainer):
 
                 pred = self.model(inputs)
 
-                for l in range(10):
-                    val_loss = val_criterion(pred[:, l], outputs[:, l])
-                    full_loss[l] += float(val_loss.item())
+                for var in range(10):
+                    val_loss = val_criterion(pred[:, var], outputs[:, var])
+                    full_loss[var] += float(val_loss.item())
 
                 if i % self.log_freq == self.log_freq - 1:
                     self.logger.info("{}  {}".format(str(loaderbar), i))
 
-                    for l in range(10):
-                        self.logger.info("loss {} : {}".format(l, full_loss[l] / i))
+                    for var in range(10):
+                        self.logger.info("loss {} : {}".format(var, full_loss[var] / i))
+            for var in range(10):
+                self.logger.info("final_loss {} : {}".format(var, full_loss[var] / (len(loaderbar) + 1)))
 
     def _save(self, epoch: int, name: str) -> None:
         if not os.path.exists(self.path):

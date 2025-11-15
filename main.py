@@ -4,6 +4,7 @@ import argparse
 # import subprocess
 import logging
 import os
+import sys
 
 # import sys
 from pathlib import Path
@@ -11,8 +12,10 @@ from pathlib import Path
 import hydra
 import pandas as pd
 import torch
+from torch.utils.data import Subset
 
-from src.dataset import SequentialDataset, AugmentedDataset
+from src.dataset import AugmentedDataset, SequentialDataset
+from src.evaluate import Evaluator
 from src.preprocess import discover_grib_variables, save_normalized_tensor
 from src.train import Trainer
 
@@ -22,7 +25,8 @@ config_name = ""
 LOGGING_CONFIG = "logging.conf"
 
 
-def run():
+@hydra.main(config_path="configs", version_base=None)
+def run(config):
     logging.config.fileConfig("logging.conf")  # type: ignore
 
     logger = logging.getLogger(__name__)
@@ -77,35 +81,81 @@ def run():
 
     data = torch.load(config.data.path)
     logger.info(f"Data shape : {data.shape}")
+
     dataset = SequentialDataset(config.model.time, data, config.data.H, config.data.W)
-    augmented_dataset = AugmentedDataset(
-        base_dataset=dataset,
-        n_augment=32,
-        noise_std=0.05,
-        noise_on_inputs=True
+    train_idx = list(range(0, int(len(dataset) * config.train.train_size)))
+    val_idx = list(range(int(len(dataset) * config.train.train_size), len(dataset)))
+
+    train_set = Subset(dataset, train_idx)
+    val_set = Subset(dataset, val_idx)
+
+    train_augmented_dataset = AugmentedDataset(
+        base_dataset=train_set, n_augment=config.augment, noise_std=0.05, noise_on_inputs=True
+    )
+    val_augmented_dataset = AugmentedDataset(
+        base_dataset=val_set, n_augment=config.augment, noise_std=0.05, noise_on_inputs=True
     )
     trainer = Trainer(
         config=config,
         device=torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"),
-        dataset=augmented_dataset,
+        train_dataset=train_augmented_dataset,
+        val_dataset=val_augmented_dataset,
     )
 
     trainer.run()
 
 
+def eval_run():
+    logging.config.fileConfig("logging.conf")  # type: ignore
+
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
+
+    logger.info("-------- Starting the program --------")
+    logger.info(f"Using config path : {config_path} / {config_name}")
+
+    # Load config file
+    hydra.initialize(config_path=config_path, version_base=None)
+    config = hydra.compose(config_name=config_name)
+
+    data = torch.load(config.data.path)
+    logger.info(f"Data shape : {data.shape}")
+    dataset = SequentialDataset(config.model.time, data, config.data.H, config.data.W)
+    train_idx = list(range(0, int(len(dataset) * config.train.train_size)))
+    val_idx = list(range(int(len(dataset) * config.train.train_size), len(dataset)))
+
+    train_set = Subset(dataset, train_idx)
+    val_set = Subset(dataset, val_idx)
+
+    train_augmented_dataset = AugmentedDataset(
+        base_dataset=train_set, n_augment=config.augment, noise_std=0.05, noise_on_inputs=True
+    )
+    val_augmented_dataset = AugmentedDataset(
+        base_dataset=val_set, n_augment=config.augment, noise_std=0.05, noise_on_inputs=True
+    )
+    evaluator = Evaluator(
+        config.model,
+        train_augmented_dataset,
+        val_augmented_dataset,
+        device=torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"),
+    )
+    evaluator.evaluate()
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", "-c", dest="config", action="store")
     parser.add_argument("--delete-logs", "-dl", dest="delete_logs", action="store_true")
+    parser.add_argument("--evaluate", "-e", dest="evaluate", action="store_true")
 
     args = parser.parse_args()
-
-    if args.config:
-        config_path, config_name = os.path.split(args.config)
     if args.delete_logs:
         if os.path.exists("debug.log"):
             os.remove("debug.log")
         if os.path.exists("error.log"):
             os.remove("error.log")
+
+    if args.evaluate:
+        eval_run()
+        sys.exit(0)
 
     run()

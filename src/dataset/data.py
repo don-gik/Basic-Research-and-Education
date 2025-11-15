@@ -20,13 +20,14 @@ class SequentialDataset(Dataset[float]):
         y = self.x[:, idx + 1 : idx + self.length + 1, : self.h, : self.w]
 
         return x, y
-    
+
 
 class AugmentedDataset(Dataset):
     """
     Wrap a base Dataset that returns (x, y) tensors.
     Expands dataset length by `n_augment` and injects gaussian noise.
     """
+
     def __init__(
         self,
         base_dataset: Dataset,
@@ -37,7 +38,7 @@ class AugmentedDataset(Dataset):
         seed: int | None = None,
     ):
         assert n_augment >= 1
-        self.base = base_dataset
+        self.base: Dataset = base_dataset
         self.n_augment = int(n_augment)
         self.noise_std = float(noise_std)
         self.noise_on_inputs = noise_on_inputs
@@ -45,14 +46,14 @@ class AugmentedDataset(Dataset):
         self.seed = int(seed) if seed is not None else 0
 
     def __len__(self) -> int:
-        return len(self.base) * self.n_augment
+        return len(self.base) * self.n_augment  # type: ignore
 
     def __getitem__(self, idx: int) -> tuple[Tensor, Tensor]:
         base_idx = idx // self.n_augment
         aug_idx = idx % self.n_augment
 
         x, y = self.base[base_idx]
-        
+
         if not torch.is_floating_point(x):
             x = x.float()
         if not torch.is_floating_point(y):
@@ -63,7 +64,6 @@ class AugmentedDataset(Dataset):
 
         device = x.device if hasattr(x, "device") else torch.device("cpu")
 
-
         g = torch.Generator(device=device)
         g.manual_seed(self.seed + base_idx * 1000003 + aug_idx)
 
@@ -73,6 +73,6 @@ class AugmentedDataset(Dataset):
         if self.noise_on_targets:
             g2 = torch.Generator(device=device)
             g2.manual_seed(self.seed + base_idx * 1000003 + aug_idx + 1)
-            y = y + torch.randn_like(y, generator=g2) * self.noise_std
+            y = y + torch.randn(y.size(), generator=g2) * self.noise_std
 
         return x, y

@@ -106,6 +106,8 @@ class SelfAttention(nn.Module):
 
         self.projection = nn.Linear(embed_dim, embed_dim)
 
+        self.last_attention: Tensor | None = None
+
     def forward(self, x: Tensor, mask: Tensor | None = None) -> Tensor:
         q: Tensor = rearrange(self.weight_q(x), "b n (h d) -> b h n d", h=self.heads)
         k: Tensor = rearrange(self.weight_q(x), "b n (h d) -> b h n d", h=self.heads)
@@ -118,6 +120,9 @@ class SelfAttention(nn.Module):
 
         attention = F.softmax(energy * self.inv_sqrt_dim, dim=-1)
         attention = self.attn_dropout(attention)
+
+        self.last_attention = attention.detach()
+
         out = einsum("bhqk, bhkv -> bhqv", attention, v)
         out = rearrange(out, "b h n d -> b n (h d)")
 
@@ -154,8 +159,10 @@ class DWSeparable(nn.Module):
             nn.Conv2d(ch, ch, 1),
         )
         self.act = nn.GELU()
+
     def forward(self, x):
         return self.act(x + self.block(x))
+
 
 class Decoder(nn.Sequential):
     def __init__(self, in_channels: int, patch_size: int, img_H: int, img_W: int, time: int) -> None:
@@ -192,15 +199,26 @@ class Model(nn.Module):
     ) -> None:
         super().__init__()
 
-        self.layer = nn.Sequential(
-            TimeEncoding(time=time, img_H=img_H, img_W=img_W),
-            PatchEmbedding(in_channels=in_channels * time, patch_size=patch_size, img_H=img_H, img_W=img_W),
-            Encoder(depth, embed_size=in_channels * (patch_size) ** 2 * time, **kwargs),
-            Decoder(in_channels=in_channels * time, patch_size=patch_size, img_H=img_H, img_W=img_W, time=time),
+        self.time_encode = TimeEncoding(time=time, img_H=img_H, img_W=img_W)
+        self.patch_embed = PatchEmbedding(
+            in_channels=in_channels * time, patch_size=patch_size, img_H=img_H, img_W=img_W
+        )
+        self.encoder = Encoder(depth, embed_size=in_channels * (patch_size) ** 2 * time, **kwargs)
+        self.decoder = Decoder(
+            in_channels=in_channels * time, patch_size=patch_size, img_H=img_H, img_W=img_W, time=time
         )
 
     def forward(self, x: Tensor):
-        return x + self.layer(x)
+        residual = x
+
+        x = self.time_encode(x)
+        x = self.patch_embed(x)
+
+        x = self.decoder(x)
+        out = residual + x
+
+        return out
+
 
 if __name__ == "__main__":
     model: nn.Module = Model(in_channels=9, patch_size=4, time=8, img_H=40, img_W=200, depth=6)
