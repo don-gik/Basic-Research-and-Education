@@ -146,11 +146,8 @@ class Trainer(BaseTrainer):
 
                 if i % self.log_freq == self.log_freq - 1:
                     self.logger.info("{}  {}".format(str(loaderbar), i))
-
-                    for var in range(10):
-                        self.logger.info("loss {} : {}".format(var, full_loss[var] / i))
             for var in range(10):
-                self.logger.info("final_loss {} : {}".format(var, full_loss[var] / (len(loaderbar) + 1)))
+                self.logger.info("final_loss {} : {}".format(var, full_loss[var] / (len(self.validation) / self.batch_size + 1)))
 
     def _save(self, epoch: int, name: str) -> None:
         if not os.path.exists(self.path):

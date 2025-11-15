@@ -149,6 +149,14 @@ class Encoder(nn.Sequential):
     def __init__(self, depth: int = 12, **kwargs):
         super().__init__(*[TransformerBlock(**kwargs) for _ in range(depth)])
 
+class UpsampleToSize(nn.Module):
+    def __init__(self, img_H: int, img_W: int):
+        super().__init__()
+        self.size = (img_H, img_W)
+
+    def forward(self, x):
+        return F.interpolate(x, size=self.size, mode="bilinear", align_corners=False)
+        
 
 class DWSeparable(nn.Module):
     def __init__(self, ch: int):
@@ -168,12 +176,8 @@ class Decoder(nn.Sequential):
     def __init__(self, in_channels: int, patch_size: int, img_H: int, img_W: int, time: int) -> None:
         super().__init__(
             Rearrange("b (h w) c -> b c h w", h=img_H // patch_size, w=img_W // patch_size),
-            nn.ConvTranspose2d(
-                in_channels=in_channels * (patch_size**2),
-                out_channels=in_channels,
-                kernel_size=patch_size,
-                stride=patch_size,
-            ),
+            nn.Conv2d(in_channels * (patch_size**2), in_channels, kernel_size=1),
+            UpsampleToSize(img_H, img_W),
             DWSeparable(in_channels),
             DWSeparable(in_channels),
             Rearrange("b (c t) h w -> b c t h w", t=time),

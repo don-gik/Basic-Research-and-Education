@@ -96,10 +96,10 @@ def run(config):
     val_set = Subset(dataset, val_idx)
 
     train_augmented_dataset = AugmentedDataset(
-        base_dataset=train_set, n_augment=config.data.augment, noise_std=0.05, noise_on_inputs=True
+        base_dataset=train_set, n_augment=config.data.augment, noise_std=config.data.std, noise_on_inputs=True
     )
     val_augmented_dataset = AugmentedDataset(
-        base_dataset=val_set, n_augment=config.data.augment, noise_std=0.05, noise_on_inputs=True
+        base_dataset=val_set, n_augment=config.data.augment, noise_std=config.data.std, noise_on_inputs=True
     )
     trainer = Trainer(
         config=config,
@@ -128,20 +128,14 @@ def eval_run(config):
 
     train_set = Subset(dataset, train_idx)
     val_set = Subset(dataset, val_idx)
-
-    train_augmented_dataset = AugmentedDataset(
-        base_dataset=train_set, n_augment=config.data.augment, noise_std=0.05, noise_on_inputs=True
-    )
-    val_augmented_dataset = AugmentedDataset(
-        base_dataset=val_set, n_augment=config.data.augment, noise_std=0.05, noise_on_inputs=True
-    )
+    
     evaluator = Evaluator(
-        config.model,
-        train_augmented_dataset,
-        val_augmented_dataset,
+        config,
+        train_set,
+        val_set,
         device=torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"),
     )
-    evaluator.evaluate()
+    evaluator.run()
 
 
 if __name__ == "__main__":

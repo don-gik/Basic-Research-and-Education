@@ -56,7 +56,7 @@ class Evaluator(BaseEval):
 
         self.logger = logging.getLogger(__name__)
 
-        self.batch_size = config.train.batch_size
+        self.batch_size = 1
         self.subset_size = config.train.subset_size
 
         self.load = config.train.load
@@ -73,8 +73,10 @@ class Evaluator(BaseEval):
             self.model.load_state_dict(torch.load(self.load, weights_only=True))
         except FileNotFoundError as e:
             self.logger.warning(f"Skipping to load model... {e}")
+            return
         except IsADirectoryError as e:
             self.logger.warning(f"Skipping to load model... {e}")
+            return
 
         self.logger.info("-------- Starting Evaluating... --------")
 
@@ -121,7 +123,7 @@ class Evaluator(BaseEval):
                         target=outputs[j].detach().cpu(),
                         pred=pred[j].detach().cpu(),
                         avg_loss=float(val_criterion(pred[j], outputs[j]).item()),
-                        loss=cur_loss,
+                        loss=list(cur_loss),
                     )
 
                 for j in range(self.batch_size):
@@ -132,8 +134,8 @@ class Evaluator(BaseEval):
                             inp=inputs[j].detach().cpu(),
                             target=outputs[j].detach().cpu(),
                             pred=pred[j].detach().cpu(),
-                            avg_loss=float(val_criterion(pred[j], outputs[j]).item()),
-                            loss=cur_loss,
+                            avg_loss=float(loss.item()),
+                            loss=list(cur_loss),
                         )
                     if loss > worst_aloss:
                         worst_aloss = loss
@@ -141,8 +143,8 @@ class Evaluator(BaseEval):
                             inp=inputs[j].detach().cpu(),
                             target=outputs[j].detach().cpu(),
                             pred=pred[j].detach().cpu(),
-                            avg_loss=float(val_criterion(pred[j], outputs[j]).item()),
-                            loss=cur_loss,
+                            avg_loss=float(loss.item()),
+                            loss=list(cur_loss),
                         )
 
                 if i % self.log_freq == self.log_freq - 1:
@@ -152,7 +154,7 @@ class Evaluator(BaseEval):
                         self.logger.info("loss {} : {}".format(var, full_loss[var] / (i + 1)))
 
             for var in range(10):
-                self.logger.info("final_loss {} : {}".format(var, full_loss[var] / (len(loaderbar) + 1)))
+                self.logger.info("final_loss {} : {}".format(var, full_loss[var] / (len(self.validation) / self.batch_size + 1)))
 
         if best_data is not None and worst_data is not None and random_data is not None:
             data = EvalData(best_sample=best_data, worst_sample=worst_data, random_sample=random_data)
@@ -236,37 +238,83 @@ class Evaluator(BaseEval):
 
         fig, ax = plt.subplots()
 
-        leads_best = np.arange(len(data.best_sample.loss))
-        leads_worst = np.arange(len(data.worst_sample.loss))
-        leads_rand = np.arange(len(data.random_sample.loss))
+        def to_floats(xs):
+            return [float(x.detach().cpu().item()) if torch.is_tensor(x) else float(x) for x in xs]
+        
+        var_names = [
+            "u100",
+            "v100",
+            "u10",
+            "v10",
+            "d2m",
+            "t2m",
+            "msl",
+            "sp",
+            "ssrc",
+            "sst"
+        ]
 
+        best_loss  = to_floats(data.best_sample.loss)
+        worst_loss = to_floats(data.worst_sample.loss)
+        rand_loss  = to_floats(data.random_sample.loss)
+
+        V = len(best_loss)
+        x = np.arange(V)
+
+        # Paper-style figure: slightly wider than tall
+        fig, ax = plt.subplots(figsize=(4.5, 3.0), dpi=300)
+
+        # Use line styles and markers that also work in grayscale
         ax.plot(
-            leads_best,
-            data.best_sample.loss,
+            x,
+            best_loss,
             marker="o",
             linestyle="-",
+            linewidth=1.0,
+            markersize=3,
             label=f"Best (avg={data.best_sample.avg_loss:.3f})",
         )
         ax.plot(
-            leads_worst,
-            data.worst_sample.loss,
+            x,
+            worst_loss,
             marker="^",
             linestyle="--",
+            linewidth=1.0,
+            markersize=3,
             label=f"Worst (avg={data.worst_sample.avg_loss:.3f})",
         )
         ax.plot(
-            leads_rand,
-            data.random_sample.loss,
+            x,
+            rand_loss,
             marker="s",
-            linestyle="-.",
+            linestyle=":",
+            linewidth=1.0,
+            markersize=3,
             label=f"Random (avg={data.random_sample.avg_loss:.3f})",
         )
 
-        ax.set_xlabel("Lead time")
-        ax.set_ylabel("Loss")
-        ax.set_title("Per-lead validation loss")
-        ax.grid(True, which="both", linestyle=":", linewidth=0.5)
-        ax.legend(frameon=False)
+        # X-axis: variable index or variable names
+        if var_names is not None and len(var_names) == V:
+            ax.set_xticks(x)
+            ax.set_xticklabels(var_names, rotation=45, ha="right")
+            ax.set_xlabel("Variable", fontsize=10)
+        else:
+            ax.set_xticks(x)
+            ax.set_xlabel("Variable index", fontsize=10)
+
+        ax.set_ylabel("Loss", fontsize=10)
+        ax.set_title("Per-variable validation loss", fontsize=10)
+
+        # Ticks and grid
+        ax.tick_params(axis="both", which="major", labelsize=8)
+        ax.grid(True, which="both", linestyle=":", linewidth=0.4)
+
+        # Clean spines for paper
+        for spine in ["top", "right"]:
+            ax.spines[spine].set_visible(False)
+
+        # Legend with smaller font
+        leg = ax.legend(frameon=False, fontsize=8, loc="best")
 
         fig.tight_layout()
 

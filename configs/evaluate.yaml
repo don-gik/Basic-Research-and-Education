@@ -10,18 +10,17 @@ data:
   H: 40
   W: 200
 
-  augment: 1
-  std: 0.00
+  augment: 32
 
   path: "./data/processed/monthly_tensor.pt"
 
 train:
   train_size: 0.9
-  batch_size: 16
-  subset_size: 512
+  batch_size: 32
+  subset_size: 4096
 
-  load: "./model/2025-11-25/model-64.pt"
-  save: "./model/2025-11-15/"
+  load: "./model/2025-11-15/model-99.pt"
+  save: "./model/2025-11-25/"
 
   epochs: 100
 
@@ -35,4 +34,4 @@ args:
 seed: 23489
 
 eval:
-  save: "./eval/2025-11-15"
+  save: "./final"
