@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import matplotlib.pyplot as plt
+from matplotlib.axes import Axes
 import numpy as np
 import torch
 import torch.nn as nn
@@ -37,8 +38,10 @@ VAR_NAMES = [
 @dataclass
 class EvalSample:
     inp: Tensor
-    target: Tensor
-    pred: Tensor
+    target_phys: Tensor
+    pred_phys: Tensor
+    target_norm: Tensor
+    pred_norm: Tensor
     avg_loss: float
     loss: list[float]
 
@@ -157,7 +160,10 @@ class Evaluator(BaseEval):
         data = data.to(self.device)
         val_criterion = nn.MSELoss()
         horizon = time_step or self.lead
-        sst_idx = self.sst_idx
+        sst_idx: int = 0
+        if self.sst_idx is not None:
+            sst_idx = self.sst_idx
+            
         sst_scale = self._var_std_scalar(sst_idx, self.device, data.dtype)
 
         C, T_total, _, _ = data.shape
@@ -302,19 +308,8 @@ class Evaluator(BaseEval):
             mininterval=0.1,
         )
 
-        accum = {
-            "per_var_sse": torch.zeros(self.var_cnt, dtype=torch.float64, device=self.device),
-            "per_var_l1": torch.zeros(self.var_cnt, dtype=torch.float64, device=self.device),
-            "per_var_point_sse": torch.zeros(self.var_cnt, dtype=torch.float64, device=self.device),
-            "per_var_point_l1": torch.zeros(self.var_cnt, dtype=torch.float64, device=self.device),
-            "per_lead_sse": torch.zeros(self.lead, dtype=torch.float64, device=self.device),
-            "per_lead_point_sse": torch.zeros(self.lead, dtype=torch.float64, device=self.device),
-            "per_lead_point_l1": torch.zeros(self.lead, dtype=torch.float64, device=self.device),
-            "per_lead_counter": torch.zeros(self.lead, dtype=torch.float64, device=self.device),
-            "per_lead_point_counter": torch.zeros(self.lead, dtype=torch.float64, device=self.device),
-            "overall_sse": torch.zeros(1, dtype=torch.float64, device=self.device),
-            "overall_l1": torch.zeros(1, dtype=torch.float64, device=self.device),
-        }
+        accum_phys = self._init_accumulator()
+        accum_norm = self._init_accumulator()
         totals = {
             "pixel_count": 0,
             "point_count": 0,
@@ -338,54 +333,72 @@ class Evaluator(BaseEval):
                 outputs = outputs.to(self.device, dtype=torch.float32, non_blocking=True)
 
                 pred = self.model(inputs)
-                scaled_outputs = self._scale_by_std(outputs)
-                scaled_pred = self._scale_by_std(pred)
-                diff = scaled_pred - scaled_outputs
-                sq_error = diff.pow(2)
-                abs_error = diff.abs()
+                scaled_outputs: Tensor = self._scale_by_std(outputs)
+                scaled_pred: Tensor = self._scale_by_std(pred)
+                phys_diff = scaled_pred - scaled_outputs
+                phys_sq_error = phys_diff.pow(2)
+                phys_abs_error = phys_diff.abs()
+
+                norm_diff = pred - outputs
+                norm_sq_error = norm_diff.pow(2)
+                norm_abs_error = norm_diff.abs()
 
                 batch_size = inputs.size(0)
-                var_cnt = diff.shape[1]
-                time_dim = diff.shape[2]
-                height = diff.shape[3]
-                width = diff.shape[4]
+                var_cnt = phys_diff.shape[1]
+                time_dim = phys_diff.shape[2]
+                height = phys_diff.shape[3]
+                width = phys_diff.shape[4]
 
                 pixels_per_sample = time_dim * height * width
                 totals["samples"] += batch_size
                 totals["pixel_count"] += batch_size * pixels_per_sample
-                totals["numel"] += diff.numel()
+                totals["numel"] += phys_diff.numel()
 
-                accum["per_var_sse"] += sq_error.sum(dim=(0, 2, 3, 4)).to(dtype=torch.float64)
-                accum["per_var_l1"] += abs_error.sum(dim=(0, 2, 3, 4)).to(dtype=torch.float64)
-                accum["overall_sse"] += sq_error.sum(dtype=torch.float64)
-                accum["overall_l1"] += abs_error.sum(dtype=torch.float64)
-
-                point_pred = scaled_pred[:, :, -1].mean(dim=(-1, -2))
-                point_target = scaled_outputs[:, :, -1].mean(dim=(-1, -2))
-                point_diff = point_pred - point_target
-                accum["per_var_point_sse"] += point_diff.pow(2).sum(dim=0).to(dtype=torch.float64)
-                accum["per_var_point_l1"] += point_diff.abs().sum(dim=0).to(dtype=torch.float64)
+                self._update_batch_metrics(
+                    accum_phys,
+                    phys_sq_error,
+                    phys_abs_error,
+                    scaled_pred,
+                    scaled_outputs,
+                )
+                self._update_batch_metrics(
+                    accum_norm,
+                    norm_sq_error,
+                    norm_abs_error,
+                    pred,
+                    outputs,
+                )
                 totals["point_count"] += batch_size
 
-                lead_targets, lead_horizon = self._build_target_sequence(outputs, sample_indices, self.lead)
+                lead_targets_norm, lead_horizon = self._build_target_sequence(outputs, sample_indices, self.lead)
                 if lead_horizon > 0:
-                    lead_preds = self._rollout_predictions(inputs, pred, lead_horizon)
-                    lead_preds = lead_preds[:, :, :lead_horizon, :, :]
-                    lead_targets = lead_targets[:, :, :lead_horizon, :, :]
-                    lead_preds = self._scale_by_std(lead_preds)
-                    lead_targets = self._scale_by_std(lead_targets)
-                    lead_diff = lead_preds - lead_targets
-                    lead_sq_error = lead_diff.pow(2)
-                    accum["per_lead_sse"][:lead_horizon] += lead_sq_error.sum(dim=(0, 1, 3, 4)).to(dtype=torch.float64)
-                    accum["per_lead_counter"][:lead_horizon] += batch_size * var_cnt * height * width
+                    lead_preds_norm = self._rollout_predictions(inputs, pred, lead_horizon)
+                    lead_preds_norm = lead_preds_norm[:, :, :lead_horizon, :, :]
+                    lead_targets_norm = lead_targets_norm[:, :, :lead_horizon, :, :]
 
-                    var_lead_pred = lead_preds[:, self.var, :, :, :].mean(dim=(-1, -2))
-                    var_lead_target = lead_targets[:, self.var, :, :, :].mean(dim=(-1, -2))
-                    var_lead_diff = var_lead_pred - var_lead_target
+                    lead_preds_phys = self._scale_by_std(lead_preds_norm)
+                    lead_targets_phys = self._scale_by_std(lead_targets_norm)
 
-                    accum["per_lead_point_sse"][:lead_horizon] += var_lead_diff.pow(2).sum(dim=0).to(dtype=torch.float64)
-                    accum["per_lead_point_l1"][:lead_horizon] += var_lead_diff.abs().sum(dim=0).to(dtype=torch.float64)
-                    accum["per_lead_point_counter"][:lead_horizon] += batch_size
+                    self._update_lead_metrics(
+                        accum_phys,
+                        lead_preds_phys,
+                        lead_targets_phys,
+                        lead_horizon,
+                        batch_size,
+                        var_cnt,
+                        height,
+                        width,
+                    )
+                    self._update_lead_metrics(
+                        accum_norm,
+                        lead_preds_norm,
+                        lead_targets_norm,
+                        lead_horizon,
+                        batch_size,
+                        var_cnt,
+                        height,
+                        width,
+                    )
 
                     if lead_horizon < self.lead and not self.lead_trunc_warned:
                         self.logger.warning(
@@ -395,13 +408,20 @@ class Evaluator(BaseEval):
                         )
                         self.lead_trunc_warned = True
 
-                sample_var_loss = sq_error.mean(dim=(2, 3, 4))
+                sample_var_loss = phys_sq_error.mean(dim=(2, 3, 4))
                 sample_avg_loss = sample_var_loss.mean(dim=1)
 
                 if random_data is None:
                     rand_idx = random.randrange(batch_size)
                     random_data = self._make_eval_sample(
-                        rand_idx, inputs, scaled_outputs, scaled_pred, sample_var_loss, sample_avg_loss
+                        rand_idx,
+                        inputs,
+                        scaled_outputs,
+                        scaled_pred,
+                        outputs,
+                        pred,
+                        sample_var_loss,
+                        sample_avg_loss,
                     )
 
                 for j in range(batch_size):
@@ -409,18 +429,32 @@ class Evaluator(BaseEval):
                     if loss_value < best_loss:
                         best_loss = loss_value
                         best_data = self._make_eval_sample(
-                            j, inputs, scaled_outputs, scaled_pred, sample_var_loss, sample_avg_loss
+                            j,
+                            inputs,
+                            scaled_outputs,
+                            scaled_pred,
+                            outputs,
+                            pred,
+                            sample_var_loss,
+                            sample_avg_loss,
                         )
                     if loss_value > worst_loss:
                         worst_loss = loss_value
                         worst_data = self._make_eval_sample(
-                            j, inputs, scaled_outputs, scaled_pred, sample_var_loss, sample_avg_loss
+                            j,
+                            inputs,
+                            scaled_outputs,
+                            scaled_pred,
+                            outputs,
+                            pred,
+                            sample_var_loss,
+                            sample_avg_loss,
                         )
 
                 if (batch_idx + 1) % self.log_freq == 0 or batch_idx == 0:
-                    self._log_running_losses(accum, totals, batch_idx + 1, total_batches)
+                    self._log_running_losses(accum_phys, totals, batch_idx + 1, total_batches)
 
-        metrics = self._build_metrics(accum, totals)
+        metrics = self._build_metrics(accum_phys, accum_norm, totals)
         self._log_metrics(metrics)
 
         samples = None
@@ -433,15 +467,19 @@ class Evaluator(BaseEval):
         self,
         idx: int,
         inputs: Tensor,
-        targets: Tensor,
-        preds: Tensor,
+        targets_phys: Tensor,
+        preds_phys: Tensor,
+        targets_norm: Tensor,
+        preds_norm: Tensor,
         per_var_loss: Tensor,
         avg_loss: Tensor,
     ) -> EvalSample:
         return EvalSample(
             inp=inputs[idx].detach().cpu(),
-            target=targets[idx].detach().cpu(),
-            pred=preds[idx].detach().cpu(),
+            target_phys=targets_phys[idx].detach().cpu(),
+            pred_phys=preds_phys[idx].detach().cpu(),
+            target_norm=targets_norm[idx].detach().cpu(),
+            pred_norm=preds_norm[idx].detach().cpu(),
             avg_loss=float(avg_loss[idx].item()),
             loss=per_var_loss[idx].detach().cpu().tolist(),
         )
@@ -455,7 +493,79 @@ class Evaluator(BaseEval):
         summary = ", ".join(f"{label}:{value:.5f}" for label, value in zip(labels, running_mse))
         self.logger.info("Batch %d/%d pixel MSE -> %s", step, total_steps, summary)
 
-    def _build_metrics(self, accum: dict[str, torch.Tensor], totals: dict[str, int]) -> dict[str, Any]:
+    def _init_accumulator(self) -> dict[str, torch.Tensor]:
+        return {
+            "per_var_sse": torch.zeros(self.var_cnt, dtype=torch.float64, device=self.device),
+            "per_var_l1": torch.zeros(self.var_cnt, dtype=torch.float64, device=self.device),
+            "per_var_point_sse": torch.zeros(self.var_cnt, dtype=torch.float64, device=self.device),
+            "per_var_point_l1": torch.zeros(self.var_cnt, dtype=torch.float64, device=self.device),
+            "per_lead_sse": torch.zeros(self.lead, dtype=torch.float64, device=self.device),
+            "per_lead_point_sse": torch.zeros(self.lead, dtype=torch.float64, device=self.device),
+            "per_lead_point_l1": torch.zeros(self.lead, dtype=torch.float64, device=self.device),
+            "per_lead_counter": torch.zeros(self.lead, dtype=torch.float64, device=self.device),
+            "per_lead_point_counter": torch.zeros(self.lead, dtype=torch.float64, device=self.device),
+            "overall_sse": torch.zeros(1, dtype=torch.float64, device=self.device),
+            "overall_l1": torch.zeros(1, dtype=torch.float64, device=self.device),
+        }
+
+    def _update_batch_metrics(
+        self,
+        accum: dict[str, torch.Tensor],
+        sq_error: Tensor,
+        abs_error: Tensor,
+        preds: Tensor,
+        targets: Tensor,
+    ) -> None:
+        accum["per_var_sse"] += sq_error.sum(dim=(0, 2, 3, 4)).to(dtype=torch.float64)
+        accum["per_var_l1"] += abs_error.sum(dim=(0, 2, 3, 4)).to(dtype=torch.float64)
+        accum["overall_sse"] += sq_error.sum(dtype=torch.float64)
+        accum["overall_l1"] += abs_error.sum(dtype=torch.float64)
+
+        point_pred = preds[:, :, -1].mean(dim=(-1, -2))
+        point_target = targets[:, :, -1].mean(dim=(-1, -2))
+        point_diff = point_pred - point_target
+        accum["per_var_point_sse"] += point_diff.pow(2).sum(dim=0).to(dtype=torch.float64)
+        accum["per_var_point_l1"] += point_diff.abs().sum(dim=0).to(dtype=torch.float64)
+
+    def _update_lead_metrics(
+        self,
+        accum: dict[str, torch.Tensor],
+        preds: Tensor,
+        targets: Tensor,
+        horizon: int,
+        batch_size: int,
+        var_cnt: int,
+        height: int,
+        width: int,
+    ) -> None:
+        lead_diff = preds - targets
+        lead_sq_error = lead_diff.pow(2)
+        accum["per_lead_sse"][:horizon] += lead_sq_error.sum(dim=(0, 1, 3, 4)).to(dtype=torch.float64)
+        accum["per_lead_counter"][:horizon] += batch_size * var_cnt * height * width
+
+        var_lead_pred = preds[:, self.var, :, :, :].mean(dim=(-1, -2))
+        var_lead_target = targets[:, self.var, :, :, :].mean(dim=(-1, -2))
+        var_lead_diff = var_lead_pred - var_lead_target
+        accum["per_lead_point_sse"][:horizon] += var_lead_diff.pow(2).sum(dim=0).to(dtype=torch.float64)
+        accum["per_lead_point_l1"][:horizon] += var_lead_diff.abs().sum(dim=0).to(dtype=torch.float64)
+        accum["per_lead_point_counter"][:horizon] += batch_size
+
+    def _build_metrics(
+        self,
+        accum_phys: dict[str, torch.Tensor],
+        accum_norm: dict[str, torch.Tensor],
+        totals: dict[str, int],
+    ) -> dict[str, Any]:
+        metrics: dict[str, Any] = {"totals": totals.copy()}
+        phys_block = self._compute_metric_block(accum_phys, totals)
+        norm_block = self._compute_metric_block(accum_norm, totals)
+        if phys_block:
+            metrics["physical"] = phys_block
+        if norm_block:
+            metrics["normalized"] = norm_block
+        return metrics
+
+    def _compute_metric_block(self, accum: dict[str, torch.Tensor], totals: dict[str, int]) -> dict[str, Any]:
         if totals["samples"] == 0:
             return {}
 
@@ -476,18 +586,22 @@ class Evaluator(BaseEval):
 
         per_lead_mse = torch.full_like(lead_counts, float("nan"))
         per_lead_point_mse = torch.full_like(lead_point_counts, float("nan"))
+        per_lead_point_mae = torch.full_like(lead_point_counts, float("nan"))
 
         valid_lead = lead_counts > 0
         valid_point = lead_point_counts > 0
 
-        per_lead_mse[valid_lead] = (accum["per_lead_sse"].detach().cpu()[valid_lead] / lead_counts[valid_lead])
-        per_lead_point_mse[valid_point] = (
-            accum["per_lead_point_sse"].detach().cpu()[valid_point] / lead_point_counts[valid_point]
-        )
-        per_lead_point_mae = torch.full_like(lead_point_counts, float("nan"))
-        per_lead_point_mae[valid_point] = (
-            accum["per_lead_point_l1"].detach().cpu()[valid_point] / lead_point_counts[valid_point]
-        )
+        if valid_lead.any():
+            per_lead_mse[valid_lead] = (
+                accum["per_lead_sse"].detach().cpu()[valid_lead] / lead_counts[valid_lead]
+            )
+        if valid_point.any():
+            per_lead_point_mse[valid_point] = (
+                accum["per_lead_point_sse"].detach().cpu()[valid_point] / lead_point_counts[valid_point]
+            )
+            per_lead_point_mae[valid_point] = (
+                accum["per_lead_point_l1"].detach().cpu()[valid_point] / lead_point_counts[valid_point]
+            )
 
         per_lead_rmse = torch.sqrt(per_lead_mse)
         per_lead_point_rmse = torch.sqrt(per_lead_point_mse)
@@ -496,7 +610,7 @@ class Evaluator(BaseEval):
         overall_rmse = overall_mse ** 0.5
         overall_mae = float((accum["overall_l1"] / numel_count).item())
 
-        metrics: dict[str, Any] = {
+        return {
             "per_variable": {
                 "mse": per_var_mse.tolist(),
                 "rmse": per_var_rmse.tolist(),
@@ -515,52 +629,57 @@ class Evaluator(BaseEval):
                 "rmse": overall_rmse,
                 "mae": overall_mae,
             },
-            "totals": totals.copy(),
         }
-
-        return metrics
 
     def _log_metrics(self, metrics: dict[str, Any]) -> None:
         if not metrics:
             self.logger.warning("No metrics were produced during evaluation.")
             return
 
-        per_var = metrics.get("per_variable", {})
-        rmse = per_var.get("rmse")
-        mse = per_var.get("mse")
-        mae = per_var.get("mae")
-        point_rmse = per_var.get("point_rmse")
+        for label, key in (("Std-scaled", "physical"), ("Normalized", "normalized")):
+            block = metrics.get(key)
+            if not block:
+                continue
 
-        if rmse and mse and mae and point_rmse:
-            labels = self._var_labels(len(rmse))
-            for label, mse_val, rmse_val, mae_val, prmse in zip(labels, mse, rmse, mae, point_rmse):
+            prefix = f"[{label}] "
+            per_var = block.get("per_variable", {})
+            rmse = per_var.get("rmse")
+            mse = per_var.get("mse")
+            mae = per_var.get("mae")
+            point_rmse = per_var.get("point_rmse")
+
+            if rmse and mse and mae and point_rmse:
+                labels = self._var_labels(len(rmse))
+                for name, mse_val, rmse_val, mae_val, prmse in zip(labels, mse, rmse, mae, point_rmse):
+                    self.logger.info(
+                        "%sVar %-4s -> pixel MSE: %.6f | RMSE: %.6f | MAE: %.6f | point RMSE: %.6f",
+                        prefix,
+                        name,
+                        mse_val,
+                        rmse_val,
+                        mae_val,
+                        prmse,
+                    )
+
+            overall = block.get("overall")
+            if overall:
                 self.logger.info(
-                    "Var %-4s -> pixel MSE: %.6f | RMSE: %.6f | MAE: %.6f | point RMSE: %.6f",
-                    label,
-                    mse_val,
-                    rmse_val,
-                    mae_val,
-                    prmse,
+                    "%sOverall -> pixel MSE: %.6f | RMSE: %.6f | MAE: %.6f",
+                    prefix,
+                    overall.get("mse", 0.0),
+                    overall.get("rmse", 0.0),
+                    overall.get("mae", 0.0),
                 )
 
-        overall = metrics.get("overall")
-        if overall:
-            self.logger.info(
-                "Overall -> pixel MSE: %.6f | RMSE: %.6f | MAE: %.6f",
-                overall.get("mse", 0.0),
-                overall.get("rmse", 0.0),
-                overall.get("mae", 0.0),
-            )
-
-        lead_metrics = metrics.get("per_lead", {})
-        lead_rmse = lead_metrics.get("rmse")
-        if isinstance(lead_rmse, list) and lead_rmse:
-            summary = self._format_lead_summary(lead_rmse)
-            self.logger.info("Per-lead RMSE -> %s", summary)
-        lead_point_rmse = lead_metrics.get("point_rmse")
-        if isinstance(lead_point_rmse, list) and lead_point_rmse:
-            summary = self._format_lead_summary(lead_point_rmse)
-            self.logger.info("Per-lead point RMSE (%s) -> %s", self.var_label, summary)
+            lead_metrics = block.get("per_lead", {})
+            lead_rmse = lead_metrics.get("rmse")
+            if isinstance(lead_rmse, list) and lead_rmse:
+                summary = self._format_lead_summary(lead_rmse)
+                self.logger.info("%sPer-lead RMSE -> %s", prefix, summary)
+            lead_point_rmse = lead_metrics.get("point_rmse")
+            if isinstance(lead_point_rmse, list) and lead_point_rmse:
+                summary = self._format_lead_summary(lead_point_rmse)
+                self.logger.info("%sPer-lead point RMSE (%s) -> %s", prefix, self.var_label, summary)
 
     def _save_metrics(self, metrics: dict[str, Any]) -> None:
         if not metrics:
@@ -692,7 +811,7 @@ class Evaluator(BaseEval):
             stds = [1.0]
         return torch.tensor(stds, dtype=torch.float32)
 
-    def _scale_by_std(self, tensor: Tensor | None) -> Tensor | None:
+    def _scale_by_std(self, tensor: Tensor) -> Tensor:
         if tensor is None or self.var_std_tensor is None:
             return tensor
         dims = tensor.dim()
@@ -724,6 +843,67 @@ class Evaluator(BaseEval):
             else:
                 formatted.append(f"t{idx}:{value:.5f}")
         return ", ".join(formatted)
+
+    def _per_var_order(
+        self, phys_metrics: dict[str, Any] | None, norm_metrics: dict[str, Any] | None
+    ) -> np.ndarray | None:
+        for block in (phys_metrics, norm_metrics):
+            if not block:
+                continue
+            per_var = block.get("per_variable", {})
+            point_rmse = per_var.get("point_rmse")
+            if point_rmse:
+                arr = np.asarray(point_rmse, dtype=float)
+                if arr.size:
+                    return np.argsort(arr)[::-1]
+        return None
+
+    def _draw_per_var_panel(
+        self, ax: Axes, metrics: dict[str, Any], title: str, order: np.ndarray | None
+    ) -> None:
+        per_var = metrics.get("per_variable", {})
+        rmse = per_var.get("rmse")
+        point_rmse = per_var.get("point_rmse")
+        if not rmse or not point_rmse:
+            ax.axis("off")
+            return
+
+        rmse_arr = np.asarray(rmse, dtype=float)
+        point_rmse_arr = np.asarray(point_rmse, dtype=float)
+        labels = np.asarray(self._var_labels(len(rmse_arr)))
+
+        if order is not None:
+            valid_order = order[order < len(labels)]
+            if valid_order.size > 0:
+                rmse_arr = rmse_arr[valid_order]
+                point_rmse_arr = point_rmse_arr[valid_order]
+                labels = labels[valid_order]
+
+        x = np.arange(len(labels))
+        width = 0.35
+
+        ax.bar(x - width / 2, rmse_arr, width, label="Pixel RMSE")
+        ax.bar(x + width / 2, point_rmse_arr, width, label="Point RMSE")
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=45, ha="right")
+        ax.set_ylabel("RMSE")
+        ax.set_xlabel("Variable")
+        ax.set_title(f"{title}: per-variable RMSE")
+        ax.grid(True, linestyle=":", linewidth=0.4)
+        ax.legend(frameon=False, fontsize=8)
+
+        for idx in range(min(3, len(x))):
+            ax.annotate(
+                f"{point_rmse_arr[idx]:.2f}",
+                xy=(x[idx] + width / 2, point_rmse_arr[idx]),
+                xytext=(0, 3),
+                textcoords="offset points",
+                fontsize=7,
+                ha="center",
+            )
+
+        for spine in ["top", "right"]:
+            ax.spines[spine].set_visible(False)
 
     def _var_labels(self, count: int) -> list[str]:
         if count <= len(VAR_NAMES):
@@ -768,64 +948,67 @@ class Evaluator(BaseEval):
 
     def _plot_sample(self, sample: EvalSample, tag: str) -> None:
         """
-        Plot target vs prediction (with error) for a single EvalSample and save as PNG.
+        Plot target vs prediction for both physical and normalized variants.
         """
         save_dir = Path(self.path) / "eval"
         save_dir.mkdir(parents=True, exist_ok=True)
 
-        target_img = self._to_numpy_img(sample.target, self.var)
-        pred_img   = self._to_numpy_img(sample.pred, self.var)
-        error_img  = np.abs(target_img - pred_img)
+        variants = [
+            ("physical", sample.target_phys, sample.pred_phys),
+            ("normalized", sample.target_norm, sample.pred_norm),
+        ]
 
-        target_img = np.asarray(target_img)
-        pred_img   = np.asarray(pred_img)
-        error_img  = np.asarray(error_img)
+        for label, target_tensor, pred_tensor in variants:
+            target_img = self._to_numpy_img(target_tensor, self.var)
+            pred_img = self._to_numpy_img(pred_tensor, self.var)
+            error_img = np.abs(target_img - pred_img)
 
-        vmin = min(target_img.min(), pred_img.min())
-        vmax = max(target_img.max(), pred_img.max())
+            target_img = np.asarray(target_img)
+            pred_img = np.asarray(pred_img)
+            error_img = np.asarray(error_img)
 
-        fig, axes = plt.subplots(
-            1,
-            3,
-            figsize=(9.0, 3.0),
-            dpi=300,
-            constrained_layout=True,
-        )
+            vmin = min(target_img.min(), pred_img.min())
+            vmax = max(target_img.max(), pred_img.max())
 
-        im0 = axes[0].imshow(target_img, origin="lower", vmin=vmin, vmax=vmax)
-        axes[0].set_title("Ground truth")
-        axes[0].set_xticks([])
-        axes[0].set_yticks([])
+            fig, axes = plt.subplots(
+                1,
+                3,
+                figsize=(9.0, 3.0),
+                dpi=300,
+                constrained_layout=True,
+            )
 
-        im1 = axes[1].imshow(pred_img, origin="lower", vmin=vmin, vmax=vmax)
-        axes[1].set_title("Prediction")
-        axes[1].set_xticks([])
-        axes[1].set_yticks([])
+            axes[0].imshow(target_img, origin="lower", vmin=vmin, vmax=vmax)
+            axes[0].set_title("Ground truth")
+            axes[0].set_xticks([])
+            axes[0].set_yticks([])
 
-        im2 = axes[2].imshow(error_img, origin="lower", cmap="magma")
-        axes[2].set_title("|Prediction - Truth|")
-        axes[2].set_xticks([])
-        axes[2].set_yticks([])
+            im1 = axes[1].imshow(pred_img, origin="lower", vmin=vmin, vmax=vmax)
+            axes[1].set_title("Prediction")
+            axes[1].set_xticks([])
+            axes[1].set_yticks([])
 
-        for ax in axes:
-            ax.spines["top"].set_visible(False)
-            ax.spines["right"].set_visible(False)
+            im2 = axes[2].imshow(error_img, origin="lower", cmap="magma")
+            axes[2].set_title("|Prediction - Truth|")
+            axes[2].set_xticks([])
+            axes[2].set_yticks([])
 
-        cbar = fig.colorbar(im1, ax=axes[:2].ravel().tolist(), fraction=0.046, pad=0.04)
-        cbar.ax.set_ylabel("Value", fontsize=9)
+            for ax in axes:
+                ax.spines["top"].set_visible(False)
+                ax.spines["right"].set_visible(False)
 
-        err_cbar = fig.colorbar(im2, ax=[axes[2]], fraction=0.046, pad=0.04)
-        err_cbar.ax.set_ylabel("|Error|", fontsize=9)
+            cbar = fig.colorbar(im1, ax=axes[:2].ravel().tolist(), fraction=0.046, pad=0.04)
+            cbar.ax.set_ylabel("Value", fontsize=9)
 
-        loss_labels = self._var_labels(len(sample.loss))
-        loss_lines = "\n".join(f"{label}: {value:.4f}" for label, value in zip(loss_labels, sample.loss))
-        fig.text(0.01, 0.02, f"Per-variable MSE\n{loss_lines}", ha="left", va="bottom", fontsize=8)
+            err_cbar = fig.colorbar(im2, ax=[axes[2]], fraction=0.046, pad=0.04)
+            err_cbar.ax.set_ylabel("|Error|", fontsize=9)
 
-        fig.suptitle(f"{self.name} - {tag} sample (avg loss={sample.avg_loss:.3f})")
+            fig.suptitle(f"{self.name} - ({label}) sample")
 
-        out_path = save_dir / f"{self.name}_{tag}_sample.png"
-        fig.savefig(out_path, bbox_inches="tight")
-        plt.close(fig)
+            safe_label = label.replace("/", "-")
+            out_path = save_dir / f"{self.name}_{tag}_{safe_label}_sample.png"
+            fig.savefig(out_path, bbox_inches="tight")
+            plt.close(fig)
 
     def _save(self, data: EvalData, metrics: dict[str, Any]) -> None:
         save_dir = Path(self.path) / "eval"
@@ -843,202 +1026,166 @@ class Evaluator(BaseEval):
             }
         )
 
-        self._plot_loss_breakdown(metrics, save_dir)
-        self._plot_lead_breakdown(metrics, save_dir)
-        self._plot_lead_point_breakdown(metrics, save_dir)
+        phys_metrics = metrics.get("physical")
+        norm_metrics = metrics.get("normalized")
+
+        self._plot_loss_breakdown(phys_metrics, norm_metrics, save_dir)
+        self._plot_lead_breakdown(phys_metrics, norm_metrics, save_dir)
+        self._plot_lead_point_breakdown(phys_metrics, norm_metrics, save_dir)
 
         self._plot_sample(data.best_sample, "best")
         self._plot_sample(data.worst_sample, "worst")
         self._plot_sample(data.random_sample, "random")
 
-    def _plot_loss_breakdown(self, metrics: dict[str, Any], save_dir: Path) -> None:
-        per_var = metrics.get("per_variable", {})
-        rmse = per_var.get("rmse")
-        point_rmse = per_var.get("point_rmse")
-        mae = per_var.get("mae")
-        point_mae = per_var.get("point_mae")
-        if not rmse or not point_rmse:
-            return
-
-        rmse_arr = np.asarray(rmse, dtype=float)
-        point_rmse_arr = np.asarray(point_rmse, dtype=float)
-        labels = np.asarray(self._var_labels(len(rmse_arr)))
-        order = np.argsort(point_rmse_arr)[::-1]
-        rmse_arr = rmse_arr[order]
-        point_rmse_arr = point_rmse_arr[order]
-        labels = labels[order]
-
-        show_mae = bool(mae and point_mae and len(mae) == len(rmse_arr))
-        mae_arr = np.asarray(mae, dtype=float)[order] if show_mae else None
-        point_mae_arr = np.asarray(point_mae, dtype=float)[order] if show_mae else None
-
-        fig_cols = 2 if show_mae else 1
-        fig, axes = plt.subplots(1, fig_cols, figsize=(6.0 * fig_cols, 3.2), dpi=300)
-        if fig_cols == 1:
-            axes = [axes]
-        else:
-            axes = list(axes)
-
-        width = 0.38
-        x = np.arange(len(labels))
-
-        axes[0].bar(x - width / 2, rmse_arr, width, label="Pixel RMSE")
-        axes[0].bar(x + width / 2, point_rmse_arr, width, label="Point RMSE")
-        axes[0].set_xticks(x)
-        axes[0].set_xticklabels(labels, rotation=45, ha="right")
-        axes[0].set_ylabel("RMSE")
-        axes[0].set_xlabel("Variable")
-        axes[0].set_title("Per-variable RMSE (sorted by point error)")
-        axes[0].grid(True, linestyle=":", linewidth=0.4)
-        axes[0].legend(frameon=False, fontsize=8)
-
-        for idx in range(min(3, len(x))):
-            axes[0].annotate(
-                f"{point_rmse_arr[idx]:.2f}",
-                xy=(x[idx] + width / 2, point_rmse_arr[idx]),
-                xytext=(0, 3),
-                textcoords="offset points",
-                fontsize=7,
+    def _plot_loss_breakdown(
+        self, phys_metrics: dict[str, Any] | None, norm_metrics: dict[str, Any] | None, save_dir: Path
+    ) -> None:
+        order = self._per_var_order(phys_metrics, norm_metrics)
+        for title, block, suffix in (
+            ("Std-scaled", phys_metrics, "physical"),
+            ("Normalized", norm_metrics, "normalized"),
+        ):
+            if not block:
+                continue
+            fig, ax = plt.subplots(1, 1, figsize=(6.0, 3.2), dpi=300)
+            self._draw_per_var_panel(ax, block, title, order)
+            overall = block.get("overall", {})
+            fig.text(
+                0.5,
+                0.02,
+                f"RMSE: {overall.get('rmse', float('nan')):.3f} | MAE: {overall.get('mae', float('nan')):.3f}",
                 ha="center",
+                fontsize=9,
             )
+            fig.tight_layout(rect=(0, 0.05, 1, 1))
+            out_base = save_dir / f"{self.name}_per_var_errors_{suffix}"
+            fig.savefig(str(out_base.with_suffix(".png")), bbox_inches="tight")
+            fig.savefig(str(out_base.with_suffix(".pdf")), bbox_inches="tight")
+            plt.close(fig)
 
-        if show_mae and mae_arr is not None and point_mae_arr is not None and len(axes) > 1:
-            axes[1].bar(x - width / 2, mae_arr, width, label="Pixel MAE", color="#7aa0c4")
-            axes[1].bar(x + width / 2, point_mae_arr, width, label="Point MAE", color="#c47a8b")
-            axes[1].set_xticks(x)
-            axes[1].set_xticklabels(labels, rotation=45, ha="right")
-            axes[1].set_ylabel("MAE")
-            axes[1].set_xlabel("Variable")
-            axes[1].set_title("Per-variable MAE (pixel vs point)")
-            axes[1].grid(True, linestyle=":", linewidth=0.4)
-            axes[1].legend(frameon=False, fontsize=8)
+    def _plot_lead_point_breakdown(
+        self, phys_metrics: dict[str, Any] | None, norm_metrics: dict[str, Any] | None, save_dir: Path
+    ) -> None:
+        variants = [
+            ("Std-scaled", phys_metrics, "physical", "#8e44ad"),
+            ("Normalized", norm_metrics, "normalized", "#1f77b4"),
+        ]
+        for label, block, suffix, color in variants:
+            if not block:
+                continue
+            per_lead = block.get("per_lead", {})
+            point_rmse_vals = per_lead.get("point_rmse")
+            if not point_rmse_vals:
+                continue
+            point_rmse_arr = self._lead_array(point_rmse_vals)
+            if not np.isfinite(point_rmse_arr).any():
+                continue
 
-        for ax in axes:
+            x = np.arange(len(point_rmse_arr))
+            fig, ax = plt.subplots(figsize=(5.0, 3.0), dpi=300)
+            ax.plot(x, point_rmse_arr, marker="o", linewidth=1.2, color=color, label=f"{label} point RMSE")
+
+            best_idx = int(np.nanargmin(point_rmse_arr))
+            worst_idx = int(np.nanargmax(point_rmse_arr))
+            ax.scatter(best_idx, point_rmse_arr[best_idx], color="#2ecc71", s=32, zorder=5)
+            ax.scatter(worst_idx, point_rmse_arr[worst_idx], color="#e74c3c", s=32, zorder=5)
+
+            ax.set_xticks(x)
+            ax.set_xlabel("Lead index")
+            ax.set_ylabel("Error")
+            ax.set_title(f"{self.var_label} {label.lower()} point error by lead")
+            ax.grid(True, linestyle=":", linewidth=0.4)
             for spine in ["top", "right"]:
                 ax.spines[spine].set_visible(False)
+            ax.legend(frameon=False, fontsize=8, loc="upper left")
 
-        overall = metrics.get("overall", {})
-        summary_text = (
-            f"Overall RMSE: {overall.get('rmse', float('nan')):.3f} | "
-            f"MSE: {overall.get('mse', float('nan')):.3f} | "
-            f"MAE: {overall.get('mae', float('nan')):.3f}"
-        )
-        fig.text(0.5, 0.04, summary_text, ha="center", fontsize=9)
+            summary_text = (
+                f"min t{best_idx}: {point_rmse_arr[best_idx]:.3f}\n"
+                f"max t{worst_idx}: {point_rmse_arr[worst_idx]:.3f}"
+            )
+            ax.text(
+                0.98,
+                0.02,
+                summary_text,
+                transform=ax.transAxes,
+                fontsize=8,
+                ha="right",
+                va="bottom",
+                bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor="0.85"),
+            )
 
-        fig.tight_layout(rect=(0, 0.08, 1, 1))
-        out_base = save_dir / f"{self.name}_per_var_errors"
-        fig.savefig(str(out_base.with_suffix(".png")), bbox_inches="tight")
-        fig.savefig(str(out_base.with_suffix(".pdf")), bbox_inches="tight")
-        plt.close(fig)
+            fig.tight_layout()
+            safe_label = self.var_label.replace("/", "-")
+            out_base = save_dir / f"{self.name}_{safe_label}_lead_point_error_{suffix}"
+            fig.savefig(str(out_base.with_suffix(".png")), bbox_inches="tight")
+            fig.savefig(str(out_base.with_suffix(".pdf")), bbox_inches="tight")
+            plt.close(fig)
 
-    def _plot_lead_point_breakdown(self, metrics: dict[str, Any], save_dir: Path) -> None:
-        per_lead = metrics.get("per_lead", {})
-        point_rmse_vals = per_lead.get("point_rmse")
-        if not point_rmse_vals:
-            return
+    def _plot_lead_breakdown(
+        self, phys_metrics: dict[str, Any] | None, norm_metrics: dict[str, Any] | None, save_dir: Path
+    ) -> None:
+        variants = [
+            ("Std-scaled", phys_metrics, "physical", "#2a4d69"),
+            ("Normalized", norm_metrics, "normalized", "#ff7f0e"),
+        ]
+        for label, block, suffix, color in variants:
+            if not block:
+                continue
+            per_lead = block.get("per_lead", {})
+            rmse_vals = per_lead.get("rmse")
+            if not rmse_vals:
+                continue
+            rmse_arr = self._lead_array(rmse_vals)
+            if not np.isfinite(rmse_arr).any():
+                continue
 
-        point_rmse_arr = self._lead_array(point_rmse_vals)
-        if not np.isfinite(point_rmse_arr).any():
-            return
+            x = np.arange(len(rmse_arr))
+            fig, ax = plt.subplots(figsize=(5.0, 3.0), dpi=300)
+            ax.plot(
+                x,
+                rmse_arr,
+                marker="o",
+                linestyle="-",
+                linewidth=1.2,
+                color=color,
+                label=f"{label} RMSE",
+            )
 
-        point_mae_vals = per_lead.get("point_mae")
-        point_mae_arr = None
-        if isinstance(point_mae_vals, list) and len(point_mae_vals) == len(point_rmse_arr):
-            point_mae_arr = self._lead_array(point_mae_vals)
-            if not np.isfinite(point_mae_arr).any():
-                point_mae_arr = None
+            best_idx = int(np.nanargmin(rmse_arr))
+            worst_idx = int(np.nanargmax(rmse_arr))
+            ax.scatter(best_idx, rmse_arr[best_idx], color="#2ecc71", s=32, zorder=5)
+            ax.scatter(worst_idx, rmse_arr[worst_idx], color="#e74c3c", s=32, zorder=5)
 
-        x = np.arange(len(point_rmse_arr))
-        fig, ax = plt.subplots(figsize=(5.0, 3.0), dpi=300)
-        ax.plot(x, point_rmse_arr, marker="o", linewidth=1.2, color="#8e44ad", label="Point RMSE")
-        if point_mae_arr is not None:
-            ax.plot(x, point_mae_arr, marker="s", linewidth=1.0, color="#f39c12", label="Point MAE")
+            mean_rmse = float(np.nanmean(rmse_arr))
+            ax.axhline(mean_rmse, color="0.5", linestyle="--", linewidth=0.8, label=f"Mean {mean_rmse:.3f}")
 
-        best_idx = int(np.nanargmin(point_rmse_arr))
-        worst_idx = int(np.nanargmax(point_rmse_arr))
-        ax.scatter(best_idx, point_rmse_arr[best_idx], color="#2ecc71", s=30, zorder=5)
-        ax.scatter(worst_idx, point_rmse_arr[worst_idx], color="#e74c3c", s=30, zorder=5)
+            ax.set_xticks(x)
+            ax.set_xlabel("Lead index")
+            ax.set_ylabel("RMSE")
+            ax.set_title(f"{label} lead-wise pixel RMSE")
+            ax.grid(True, linestyle=":", linewidth=0.4)
+            for spine in ["top", "right"]:
+                ax.spines[spine].set_visible(False)
+            ax.legend(frameon=False, fontsize=8)
 
-        ax.set_xticks(x)
-        ax.set_xlabel("Lead index")
-        ax.set_ylabel("Error")
-        ax.set_title(f"{self.var_label} point error by lead")
-        ax.grid(True, linestyle=":", linewidth=0.4)
-        for spine in ["top", "right"]:
-            ax.spines[spine].set_visible(False)
-        ax.legend(frameon=False, fontsize=8, loc="upper left")
+            stats_text = (
+                f"min t{best_idx}: {rmse_arr[best_idx]:.3f}\n"
+                f"max t{worst_idx}: {rmse_arr[worst_idx]:.3f}\n"
+                f"std: {np.nanstd(rmse_arr):.3f}"
+            )
+            ax.text(
+                0.98,
+                0.02,
+                stats_text,
+                transform=ax.transAxes,
+                fontsize=8,
+                ha="right",
+                va="bottom",
+                bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor="0.85"),
+            )
 
-        summary_text = (
-            f"min RMSE t{best_idx}: {point_rmse_arr[best_idx]:.3f}\n"
-            f"max RMSE t{worst_idx}: {point_rmse_arr[worst_idx]:.3f}"
-        )
-        ax.text(
-            0.98,
-            0.02,
-            summary_text,
-            transform=ax.transAxes,
-            fontsize=8,
-            ha="right",
-            va="bottom",
-            bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor="0.85"),
-        )
-
-        fig.tight_layout()
-        safe_label = self.var_label.replace("/", "-")
-        out_base = save_dir / f"{self.name}_{safe_label}_lead_point_error"
-        fig.savefig(str(out_base.with_suffix(".png")), bbox_inches="tight")
-        fig.savefig(str(out_base.with_suffix(".pdf")), bbox_inches="tight")
-        plt.close(fig)
-
-    def _plot_lead_breakdown(self, metrics: dict[str, Any], save_dir: Path) -> None:
-        per_lead = metrics.get("per_lead", {})
-        rmse_vals = per_lead.get("rmse")
-        if not rmse_vals:
-            return
-
-        rmse_arr = self._lead_array(rmse_vals)
-        if not np.isfinite(rmse_arr).any():
-            return
-
-        x = np.arange(len(rmse_arr))
-        fig, ax = plt.subplots(figsize=(5.0, 3.0), dpi=300)
-        ax.plot(x, rmse_arr, marker="o", linestyle="-", linewidth=1.2, label="Pixel RMSE", color="#2a4d69")
-
-        best_idx = int(np.nanargmin(rmse_arr))
-        worst_idx = int(np.nanargmax(rmse_arr))
-        ax.scatter(best_idx, rmse_arr[best_idx], color="#2ecc71", s=30, zorder=5, label="Min RMSE")
-        ax.scatter(worst_idx, rmse_arr[worst_idx], color="#e74c3c", s=30, zorder=5, label="Max RMSE")
-
-        mean_rmse = float(np.nanmean(rmse_arr))
-        ax.axhline(mean_rmse, color="0.5", linestyle="--", linewidth=0.8, label=f"Mean {mean_rmse:.3f}")
-
-        ax.set_xticks(x)
-        ax.set_xlabel("Lead index")
-        ax.set_ylabel("RMSE")
-        ax.set_title("Lead-wise pixel RMSE")
-        ax.grid(True, linestyle=":", linewidth=0.4)
-        for spine in ["top", "right"]:
-            ax.spines[spine].set_visible(False)
-        ax.legend(frameon=False, fontsize=8)
-
-        stats_text = (
-            f"min t{best_idx}: {rmse_arr[best_idx]:.3f}\n"
-            f"max t{worst_idx}: {rmse_arr[worst_idx]:.3f}\n"
-            f"std: {np.nanstd(rmse_arr):.3f}"
-        )
-        ax.text(
-            0.98,
-            0.02,
-            stats_text,
-            transform=ax.transAxes,
-            fontsize=8,
-            ha="right",
-            va="bottom",
-            bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor="0.85"),
-        )
-
-        fig.tight_layout()
-        out_base = save_dir / f"{self.name}_lead_rmse"
-        fig.savefig(str(out_base.with_suffix(".png")), bbox_inches="tight")
-        fig.savefig(str(out_base.with_suffix(".pdf")), bbox_inches="tight")
-        plt.close(fig)
+            fig.tight_layout()
+            out_base = save_dir / f"{self.name}_lead_rmse_{suffix}"
+            fig.savefig(str(out_base.with_suffix(".png")), bbox_inches="tight")
+            fig.savefig(str(out_base.with_suffix(".pdf")), bbox_inches="tight")
+            plt.close(fig)
