@@ -2,6 +2,5 @@
 
 My basic r&e github repo.
 
-This research targets : better prediction of ENSO
-preserving dimensions with positional encoding by using
+This research targets : better prediction of ENSO by using
 attention-based algorithm.
