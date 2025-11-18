@@ -137,6 +137,8 @@ def eval_run(config):
     )
     evaluator.run()
 
+    evaluator._log(data)
+
 
 if __name__ == "__main__":
     run()

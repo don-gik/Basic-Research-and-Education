@@ -28,10 +28,11 @@ train:
 
 args:
   preprocess: true
-  evaluate: false
+  evaluate: true
   delete_logs: true
 
 seed: 23489
 
-eval:
+ev:
   save: "./final"
+  var: -1
