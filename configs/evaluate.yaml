@@ -13,6 +13,7 @@ data:
   augment: 32
 
   path: "./data/processed/monthly_tensor.pt"
+  stats_path: "./data/processed/monthly_tensor_stats.json"
 
 train:
   train_size: 0.9

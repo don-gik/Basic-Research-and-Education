@@ -115,15 +115,23 @@ class Evaluator(BaseEval):
             parsed_lead = self.time
         self.lead = max(1, parsed_lead)
         self.var_cnt = config.data.var_cnt
+        self.channel_labels = self._var_labels(self.var_cnt)
+        self.var_name_to_idx = {name: idx for idx, name in enumerate(self.channel_labels)}
         raw_var = getattr(eval_cfg, "var", self.var_cnt - 1)
         try:
             raw_var_idx = int(raw_var)
         except (TypeError, ValueError):
             raw_var_idx = self.var_cnt - 1
         self.var = raw_var_idx % self.var_cnt
-        self.var_label = self._var_labels(self.var_cnt)[self.var]
+        self.var_label = self.channel_labels[self.var]
         self.H = config.data.H
         self.W = config.data.W
+
+        stats_path = Path(getattr(config.data, "stats_path", "./data/processed/monthly_tensor_stats.json"))
+        self.stats_path = stats_path
+        self.channel_stats = self._load_channel_stats(stats_path)
+        self.var_std_tensor = self._build_var_std_tensor(self.channel_stats, self.channel_labels)
+        self.sst_idx = self.var_name_to_idx.get("sst", min(self.var_cnt - 1, len(self.channel_labels) - 1))
 
         self.sequence_tensor = self._extract_sequence_tensor(self.validation)
         self.full_sequence_len = int(self.sequence_tensor.shape[1]) if self.sequence_tensor is not None else 0
@@ -149,6 +157,8 @@ class Evaluator(BaseEval):
         data = data.to(self.device)
         val_criterion = nn.MSELoss()
         horizon = time_step or self.lead
+        sst_idx = self.sst_idx
+        sst_scale = self._var_std_scalar(sst_idx, self.device, data.dtype)
 
         C, T_total, _, _ = data.shape
 
@@ -180,10 +190,13 @@ class Evaluator(BaseEval):
                     pred = self.model(inp)               # [1, C, T_out, H, W] (assumed)
 
                     # Predicted SST at next step: last time index of SST channel
-                    pred_sst = pred[0, -1, -1, :, :]     # [H, W]
+                    pred_sst = pred[0, sst_idx, -1, :, :]     # [H, W]
 
                     # True SST at (start + self.time + lead)
-                    true_sst = data[-1, start + self.time + lead, -self.H:, -self.W:]
+                    true_sst = data[sst_idx, start + self.time + lead, -self.H:, -self.W:]
+
+                    pred_sst = pred_sst * sst_scale
+                    true_sst = true_sst * sst_scale
 
                     # Global "point" value: average over H, W -> 0-D
                     point_pred = torch.mean(torch.mean(pred_sst, dim=-1), dim=-1)
@@ -325,7 +338,9 @@ class Evaluator(BaseEval):
                 outputs = outputs.to(self.device, dtype=torch.float32, non_blocking=True)
 
                 pred = self.model(inputs)
-                diff = pred - outputs
+                scaled_outputs = self._scale_by_std(outputs)
+                scaled_pred = self._scale_by_std(pred)
+                diff = scaled_pred - scaled_outputs
                 sq_error = diff.pow(2)
                 abs_error = diff.abs()
 
@@ -345,8 +360,8 @@ class Evaluator(BaseEval):
                 accum["overall_sse"] += sq_error.sum(dtype=torch.float64)
                 accum["overall_l1"] += abs_error.sum(dtype=torch.float64)
 
-                point_pred = pred[:, :, -1].mean(dim=(-1, -2))
-                point_target = outputs[:, :, -1].mean(dim=(-1, -2))
+                point_pred = scaled_pred[:, :, -1].mean(dim=(-1, -2))
+                point_target = scaled_outputs[:, :, -1].mean(dim=(-1, -2))
                 point_diff = point_pred - point_target
                 accum["per_var_point_sse"] += point_diff.pow(2).sum(dim=0).to(dtype=torch.float64)
                 accum["per_var_point_l1"] += point_diff.abs().sum(dim=0).to(dtype=torch.float64)
@@ -357,6 +372,8 @@ class Evaluator(BaseEval):
                     lead_preds = self._rollout_predictions(inputs, pred, lead_horizon)
                     lead_preds = lead_preds[:, :, :lead_horizon, :, :]
                     lead_targets = lead_targets[:, :, :lead_horizon, :, :]
+                    lead_preds = self._scale_by_std(lead_preds)
+                    lead_targets = self._scale_by_std(lead_targets)
                     lead_diff = lead_preds - lead_targets
                     lead_sq_error = lead_diff.pow(2)
                     accum["per_lead_sse"][:lead_horizon] += lead_sq_error.sum(dim=(0, 1, 3, 4)).to(dtype=torch.float64)
@@ -383,16 +400,22 @@ class Evaluator(BaseEval):
 
                 if random_data is None:
                     rand_idx = random.randrange(batch_size)
-                    random_data = self._make_eval_sample(rand_idx, inputs, outputs, pred, sample_var_loss, sample_avg_loss)
+                    random_data = self._make_eval_sample(
+                        rand_idx, inputs, scaled_outputs, scaled_pred, sample_var_loss, sample_avg_loss
+                    )
 
                 for j in range(batch_size):
                     loss_value = float(sample_avg_loss[j].item())
                     if loss_value < best_loss:
                         best_loss = loss_value
-                        best_data = self._make_eval_sample(j, inputs, outputs, pred, sample_var_loss, sample_avg_loss)
+                        best_data = self._make_eval_sample(
+                            j, inputs, scaled_outputs, scaled_pred, sample_var_loss, sample_avg_loss
+                        )
                     if loss_value > worst_loss:
                         worst_loss = loss_value
-                        worst_data = self._make_eval_sample(j, inputs, outputs, pred, sample_var_loss, sample_avg_loss)
+                        worst_data = self._make_eval_sample(
+                            j, inputs, scaled_outputs, scaled_pred, sample_var_loss, sample_avg_loss
+                        )
 
                 if (batch_idx + 1) % self.log_freq == 0 or batch_idx == 0:
                     self._log_running_losses(accum, totals, batch_idx + 1, total_batches)
@@ -640,6 +663,54 @@ class Evaluator(BaseEval):
                 values.append(value)
         return values
 
+    def _load_channel_stats(self, stats_path: Path) -> dict[str, Any]:
+        try:
+            with stats_path.open("r", encoding="utf-8") as fp:
+                data = json.load(fp)
+        except FileNotFoundError:
+            self.logger.warning("Stats file '%s' not found; evaluation will stay normalized.", stats_path)
+            return {}
+        except json.JSONDecodeError as exc:
+            self.logger.warning("Failed to parse stats file '%s': %s", stats_path, exc)
+            return {}
+        if not isinstance(data, dict):
+            self.logger.warning("Stats file '%s' does not contain a dictionary.", stats_path)
+            return {}
+        return data
+
+    def _build_var_std_tensor(self, stats: dict[str, Any], labels: list[str]) -> torch.Tensor:
+        stds: list[float] = []
+        for name in labels:
+            entry = stats.get(name) or stats.get(name.lower()) or stats.get(name.upper())
+            value = 1.0
+            if isinstance(entry, dict):
+                raw_std = entry.get("std")
+                if isinstance(raw_std, (float, int)) and math.isfinite(raw_std) and raw_std != 0:
+                    value = float(raw_std)
+            stds.append(value)
+        if not stds:
+            stds = [1.0]
+        return torch.tensor(stds, dtype=torch.float32)
+
+    def _scale_by_std(self, tensor: Tensor | None) -> Tensor | None:
+        if tensor is None or self.var_std_tensor is None:
+            return tensor
+        dims = tensor.dim()
+        std = self.var_std_tensor.to(tensor.device, tensor.dtype)
+        if dims == 5:
+            scale = std.view(1, -1, 1, 1, 1)
+        elif dims == 4:
+            scale = std.view(-1, 1, 1, 1)
+        elif dims == 3 and tensor.size(0) == std.numel():
+            scale = std.view(-1, 1, 1)
+        else:
+            return tensor
+        return tensor * scale
+
+    def _var_std_scalar(self, idx: int, device: torch.device, dtype: torch.dtype) -> Tensor:
+        std = self.var_std_tensor[idx]
+        return std.to(device=device, dtype=dtype)
+
     @staticmethod
     def _lead_array(values: list[float | None]) -> np.ndarray:
         return np.array([np.nan if value is None else value for value in values], dtype=float)
@@ -662,25 +733,38 @@ class Evaluator(BaseEval):
         labels.extend(f"var_{idx}" for idx in range(len(labels), count))
         return labels[:count]
 
-    @staticmethod
-    def _to_numpy_img(x: Tensor, var: int) -> np.ndarray:
+    def _to_numpy_img(self, x: Tensor, var: int) -> np.ndarray:
         """
-        Convert a Tensor to a 2D numpy array suitable for imshow.
-        Picks the first indices if there are extra dims.
+        Convert a prediction/target tensor into a 2D array for plotting.
+        Expects tensors in [C, T, H, W] (standard for this project) but
+        gracefully handles squeezed dimensions as well.
         """
-        arr = x.detach().cpu().numpy()
+        arr = x.detach().cpu()
 
-        # Squeeze batch/time dims etc.
-        while arr.ndim > 3:
+        while arr.ndim > 4:
             arr = arr[0]
-        
-        if arr.ndim == 3:
-            arr = arr[var]
+
+        if arr.ndim == 4:
+            var_idx = var % arr.shape[0]
+            time_idx = arr.shape[1] - 1 if arr.shape[1] > 1 else 0
+            arr = arr[var_idx, time_idx]
+        elif arr.ndim == 3:
+            first_dim = arr.shape[0]
+            if first_dim >= self.var_cnt:
+                var_idx = var % first_dim
+                arr = arr[var_idx]
+                if arr.ndim == 3:  # Remaining dims might still include time
+                    arr = arr[-1]
+            else:
+                time_idx = first_dim - 1 if first_dim > 1 else 0
+                arr = arr[time_idx]
+        elif arr.ndim != 2:
+            raise ValueError(f"Cannot convert tensor with shape {tuple(x.shape)} to 2D image.")
 
         if arr.ndim != 2:
-            raise ValueError(f"Cannot convert tensor with shape {x.shape} to 2D image.")
+            raise ValueError(f"Unexpected tensor shape after slicing: {tuple(arr.shape)}")
 
-        return arr
+        return arr.numpy()
 
     def _plot_sample(self, sample: EvalSample, tag: str) -> None:
         """
