@@ -100,10 +100,31 @@ class Trainer(BaseTrainer):
 
                 optimizer.zero_grad()
 
-                pred = self.model(inputs)
+                horizon = outputs.size(1)
+                current = inputs
+                total_loss = 0.0
 
-                loss = criterion(pred, outputs)
-                loss.backward()
+                preds = []
+
+                for t in range(horizon):
+                    step_pred = self.model(current)
+
+                    target_t = outputs[:, t]
+
+                    step_loss = criterion(step_pred, target_t)
+                    total_loss = total_loss + step_loss
+
+                    preds.append(step_pred.unsqueeze(1))
+
+                    teacher_forcing = 0.5
+                    use_teacher = torch.rand(1).item() < teacher_forcing
+                    next_frame = target_t if use_teacher else step_pred
+
+                    current = torch.cat([
+                        current[:, 1:], next_frame.unsqueeze(1)
+                    ], dim=1)
+
+                loss = total_loss / horizon
 
                 optimizer.step()  # type: ignore
 

@@ -14,7 +14,7 @@ import pandas as pd
 import torch
 from torch.utils.data import Subset
 
-from src.dataset import AugmentedDataset, SequentialDataset
+from src.dataset import AugmentedDataset, SequentialDataset, MultiStepSequentialDataset
 from src.evaluate import Evaluator
 from src.preprocess import discover_grib_variables, save_normalized_tensor
 from src.train import Trainer
@@ -88,7 +88,13 @@ def run(config):
     data = torch.load(config.data.path)
     logger.info(f"Data shape : {data.shape}")
 
-    dataset = SequentialDataset(config.model.time, data, config.data.H, config.data.W)
+    dataset = MultiStepSequentialDataset(
+        x=data,
+        in_len=config.model.time,
+        out_len=8,
+        H=config.data.H,
+        W=config.data.W
+    )
     train_idx = list(range(0, int(len(dataset) * config.train.train_size)))
     val_idx = list(range(int(len(dataset) * config.train.train_size), len(dataset)))
 

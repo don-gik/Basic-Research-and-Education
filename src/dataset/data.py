@@ -21,6 +21,49 @@ class SequentialDataset(Dataset[float]):
 
         return x, y
 
+class MultiStepSequentialDataset(Dataset):
+    """
+    x is assumed to have shape (C, T, H, W), same as in your SequentialDataset.
+
+    Each item:
+        x: x[:, idx : idx + in_len, :H, :W]          # context sequence
+        y: x[:, idx + in_len : idx + in_len + out_len, :H, :W]  # future sequence
+    """
+
+    def __init__(self, x: Tensor, in_len: int, out_len: int, H: int, W: int):
+        assert in_len >= 1
+        assert out_len >= 1
+        assert x.ndim >= 3  # (C, T, ...)
+
+        self.x = x
+        self.in_len = in_len
+        self.out_len = out_len
+        self.h = H
+        self.w = W
+
+        # total usable time steps = T - (in_len + out_len) + 1
+        self._len = x.shape[1] - (in_len + out_len) + 1
+        if self._len <= 0:
+            raise ValueError(
+                f"Not enough time steps ({x.shape[1]}) for in_len={in_len}, out_len={out_len}"
+            )
+
+    def __len__(self) -> int:
+        return self._len
+
+    def __getitem__(self, idx: int) -> tuple[Tensor, Tensor]:
+        # context sequence
+        x_seq = self.x[:, idx : idx + self.in_len, : self.h, : self.w]
+
+        # future sequence (multi-step target)
+        y_seq = self.x[
+            :,
+            idx + self.in_len : idx + self.in_len + self.out_len,
+            : self.h,
+            : self.w,
+        ]
+
+        return x_seq, y_seq
 
 class AugmentedDataset(Dataset):
     """
