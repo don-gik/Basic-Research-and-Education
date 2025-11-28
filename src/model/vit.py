@@ -110,7 +110,7 @@ class SelfAttention(nn.Module):
 
     def forward(self, x: Tensor, mask: Tensor | None = None) -> Tensor:
         q: Tensor = rearrange(self.weight_q(x), "b n (h d) -> b h n d", h=self.heads)
-        k: Tensor = rearrange(self.weight_q(x), "b n (h d) -> b h n d", h=self.heads)
+        k: Tensor = rearrange(self.weight_k(x), "b n (h d) -> b h n d", h=self.heads)
         v: Tensor = rearrange(self.weight_v(x), "b n (h d) -> b h n d", h=self.heads)
 
         energy = einsum("bhqd, bhkd -> bhqk", q, k)
