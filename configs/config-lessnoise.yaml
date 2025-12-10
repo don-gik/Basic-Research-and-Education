@@ -1,7 +1,8 @@
 model:
   time: 8
-  patch_size: 4
-  depth: 8
+  patch_size: 2
+  depth: 4
+  embed_size: 128
 
   name: "model-"
 
@@ -9,6 +10,7 @@ data:
   var_cnt: 10
   H: 40
   W: 200
+  horizon: 12
 
   augment: 1
   std: 0.00

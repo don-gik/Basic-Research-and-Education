@@ -152,23 +152,23 @@ class Evaluator(BaseEval):
         Compute an SST lead-time curve by iteratively predicting and
         comparing to ground truth, then plot RMSE per lead.
 
+        Also plots 3-month (3-step) running-mean RMSE of the scalar SST series.
+
         data: Tensor of shape [C, T, H, W]
         time_step: number of forecast leads
         n_samples: number of different start indices to average over
         """
-        # Move data and criterion outside loops
         data = data.to(self.device)
         val_criterion = nn.MSELoss()
         horizon = time_step or self.lead
         sst_idx: int = 0
         if self.sst_idx is not None:
             sst_idx = self.sst_idx
-            
+
         sst_scale = self._var_std_scalar(sst_idx, self.device, data.dtype)
 
         C, T_total, _, _ = data.shape
 
-        # Make sure we have enough time steps
         max_start = T_total - (self.time + horizon)
         if max_start <= 0:
             raise ValueError(
@@ -176,53 +176,72 @@ class Evaluator(BaseEval):
                 .format(T_total, self.time, horizon)
             )
 
-        # Accumulate MSE per lead (we will take sqrt at the end for RMSE)
+        # Monthly (per-lead) MSE sums
         lead_mse_sum = [0.0 for _ in range(horizon)]
+
+        # 3-month running-mean MSE sums (length horizon-2)
+        lead3_mse_sum = [0.0 for _ in range(max(0, horizon - 2))]
 
         self.model.eval()
         with torch.no_grad():
-            # Repeat experiment for several different start indices
             for sample_idx in range(n_samples):
-                # You can also use a fixed pattern (e.g. start = sample_idx)
                 start = random.randint(0, max_start)
 
-                # Initial window: [C, self.time, H, W] -> [1, C, self.time, H, W]
                 test = data[:, start:start + self.time, -self.H:, -self.W:].unsqueeze(0)
 
-                # Iterative 1-step-ahead prediction
+                # Store scalar SST predictions/targets for 3-month averaging
+                pred_points: list[float] = []
+                true_points: list[float] = []
+
                 for lead in range(horizon):
-                    # Use only the last self.time time steps as input
-                    inp = test[:, :, -self.time:, :, :]  # [1, C, self.time, H, W]
-                    pred = self.model(inp)               # [1, C, T_out, H, W] (assumed)
+                    inp = test[:, :, -self.time:, :, :]
+                    pred = self.model(inp)
 
-                    # Predicted SST at next step: last time index of SST channel
-                    pred_sst = pred[0, sst_idx, -1, :, :]     # [H, W]
-
-                    # True SST at (start + self.time + lead)
+                    pred_sst = pred[0, sst_idx, -1, :, :]
                     true_sst = data[sst_idx, start + self.time + lead, -self.H:, -self.W:]
 
                     pred_sst = pred_sst * sst_scale
                     true_sst = true_sst * sst_scale
 
-                    # Global "point" value: average over H, W -> 0-D
                     point_pred = torch.mean(torch.mean(pred_sst, dim=-1), dim=-1)
                     point_target = torch.mean(torch.mean(true_sst, dim=-1), dim=-1)
 
-                    # MSE between scalar predictions (this is just (pred - target)^2)
+                    # Monthly per-lead MSE
                     val_loss = val_criterion(point_pred, point_target)
                     lead_mse_sum[lead] += val_loss.item()
 
-                    # Append the predicted last frame for all channels to the test window
-                    next_frame = pred[:, :, -1:, :, :]   # [1, C, 1, H, W]
+                    # Collect scalars for 3-month running mean
+                    pred_points.append(float(point_pred.item()))
+                    true_points.append(float(point_target.item()))
+
+                    next_frame = pred[:, :, -1:, :, :]
                     test = torch.cat((test, next_frame), dim=2)
 
-        # Compute RMSE per lead and log
+                # 3-month running-mean MSE on scalar series
+                if horizon >= 3:
+                    for k in range(horizon - 2):
+                        avg_pred = (pred_points[k] + pred_points[k + 1] + pred_points[k + 2]) / 3.0
+                        avg_true = (true_points[k] + true_points[k + 1] + true_points[k + 2]) / 3.0
+                        lead3_mse_sum[k] += (avg_pred - avg_true) ** 2
+
+        # Compute RMSE per lead
         lead_rmse = [0.0 for _ in range(horizon)]
         for lead in range(horizon):
             mse = lead_mse_sum[lead] / float(n_samples)
             rmse = mse ** 0.5
             lead_rmse[lead] = rmse
             self.logger.info("{} Lead RMSE : {}".format(lead, rmse))
+
+        # Compute 3-month running-mean RMSE per lead-position
+        lead_rmse_3m: list[float] = []
+        if horizon >= 3:
+            lead_rmse_3m = [0.0 for _ in range(horizon - 2)]
+            for k in range(horizon - 2):
+                mse3 = lead3_mse_sum[k] / float(n_samples)
+                rmse3 = mse3 ** 0.5
+                lead_rmse_3m[k] = rmse3
+                # Centered at lead index k+1 (window k,k+1,k+2)
+                self.logger.info("{} Lead 3M-RMSE : {}".format(k + 1, rmse3))
 
         # Plot RMSE lead curve
         save_dir = Path(self.path) / "eval"
@@ -239,8 +258,21 @@ class Evaluator(BaseEval):
             linestyle="-",
             linewidth=1.0,
             markersize=3,
-            label="SST RMSE",
+            label="SST RMSE (monthly)",
         )
+
+        # Plot 3-month running-mean curve (aligned to center lead)
+        if horizon >= 3:
+            x3 = np.arange(horizon - 2) + 1
+            ax.plot(
+                x3,
+                lead_rmse_3m,
+                marker="o",
+                linestyle="--",
+                linewidth=1.0,
+                markersize=3,
+                label="SST RMSE (3-month avg)",
+            )
 
         ax.set_xticks(x)
         ax.set_xlabel("Lead index")

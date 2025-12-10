@@ -217,7 +217,7 @@ class Model(nn.Module):
 
         x = self.time_encode(x)
         x = self.patch_embed(x)
-
+        x = self.encoder(x)
         x = self.decoder(x)
         out = residual + x
 
