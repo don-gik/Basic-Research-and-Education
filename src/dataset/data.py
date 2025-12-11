@@ -21,6 +21,7 @@ class SequentialDataset(Dataset[float]):
 
         return x, y
 
+
 class MultiStepSequentialDataset(Dataset):
     """
     x is assumed to have shape (C, T, H, W), same as in your SequentialDataset.
@@ -44,9 +45,7 @@ class MultiStepSequentialDataset(Dataset):
         # total usable time steps = T - (in_len + out_len) + 1
         self._len = x.shape[1] - (in_len + out_len) + 1
         if self._len <= 0:
-            raise ValueError(
-                f"Not enough time steps ({x.shape[1]}) for in_len={in_len}, out_len={out_len}"
-            )
+            raise ValueError(f"Not enough time steps ({x.shape[1]}) for in_len={in_len}, out_len={out_len}")
 
     def __len__(self) -> int:
         return self._len
@@ -64,6 +63,7 @@ class MultiStepSequentialDataset(Dataset):
         ]
 
         return x_seq, y_seq
+
 
 class AugmentedDataset(Dataset):
     """

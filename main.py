@@ -1,5 +1,4 @@
 # Must be coded in future for easily testing and training.
-import argparse
 
 # import subprocess
 import logging
@@ -139,7 +138,7 @@ def eval_run(config):
 
     train_set = Subset(dataset, train_idx)
     val_set = Subset(dataset, val_idx)
-    
+
     evaluator = Evaluator(
         config,
         train_set,

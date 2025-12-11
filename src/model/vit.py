@@ -149,6 +149,7 @@ class Encoder(nn.Sequential):
     def __init__(self, depth: int = 12, **kwargs):
         super().__init__(*[TransformerBlock(**kwargs) for _ in range(depth)])
 
+
 class UpsampleToSize(nn.Module):
     def __init__(self, img_H: int, img_W: int):
         super().__init__()
@@ -156,7 +157,7 @@ class UpsampleToSize(nn.Module):
 
     def forward(self, x):
         return F.interpolate(x, size=self.size, mode="bilinear", align_corners=False)
-        
+
 
 class DWSeparable(nn.Module):
     def __init__(self, ch: int):

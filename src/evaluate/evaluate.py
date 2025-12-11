@@ -1,6 +1,6 @@
 import json
 import logging
-import os
+import math
 import random
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -8,18 +8,17 @@ from pathlib import Path
 from typing import Any
 
 import matplotlib.pyplot as plt
-from matplotlib.axes import Axes
 import numpy as np
 import torch
 import torch.nn as nn
-import math
+from matplotlib.axes import Axes
 from omegaconf import DictConfig, ListConfig
 from torch import Tensor
-from torch.utils.data import DataLoader, Dataset as TorchDataset
+from torch.utils.data import DataLoader
+from torch.utils.data import Dataset as TorchDataset
 from tqdm import tqdm
 
 from src.model import Model
-
 
 VAR_NAMES = [
     "u100",
@@ -156,7 +155,7 @@ class Evaluator(BaseEval):
             )
 
         self.device = device
-    
+
     def _log_sst(self, data: Tensor, time_step: int | None = None, n_samples: int = 100) -> None:
         """
         Compute an SST lead-time curve by iteratively predicting and
@@ -173,7 +172,7 @@ class Evaluator(BaseEval):
         sst_idx: int = 0
         if self.sst_idx is not None:
             sst_idx = self.sst_idx
-            
+
         sst_scale = self._var_std_scalar(sst_idx, self.device, data.dtype)
 
         C, T_total, _, _ = data.shape
@@ -182,8 +181,9 @@ class Evaluator(BaseEval):
         max_start = T_total - (self.time + horizon)
         if max_start <= 0:
             raise ValueError(
-                "Not enough time steps in data (T={}) for self.time={} and lead horizon={}."
-                .format(T_total, self.time, horizon)
+                "Not enough time steps in data (T={}) for self.time={} and lead horizon={}.".format(
+                    T_total, self.time, horizon
+                )
             )
 
         # Accumulate MSE per lead (we will take sqrt at the end for RMSE)
@@ -197,19 +197,19 @@ class Evaluator(BaseEval):
                 start = random.randint(0, max_start)
 
                 # Initial window: [C, self.time, H, W] -> [1, C, self.time, H, W]
-                test = data[:, start:start + self.time, -self.H:, -self.W:].unsqueeze(0)
+                test = data[:, start : start + self.time, -self.H :, -self.W :].unsqueeze(0)
 
                 # Iterative 1-step-ahead prediction
                 for lead in range(horizon):
                     # Use only the last self.time time steps as input
-                    inp = test[:, :, -self.time:, :, :]  # [1, C, self.time, H, W]
-                    pred = self.model(inp)               # [1, C, T_out, H, W] (assumed)
+                    inp = test[:, :, -self.time :, :, :]  # [1, C, self.time, H, W]
+                    pred = self.model(inp)  # [1, C, T_out, H, W] (assumed)
 
                     # Predicted SST at next step: last time index of SST channel
-                    pred_sst = pred[0, sst_idx, -1, :, :]     # [H, W]
+                    pred_sst = pred[0, sst_idx, -1, :, :]  # [H, W]
 
                     # True SST at (start + self.time + lead)
-                    true_sst = data[sst_idx, start + self.time + lead, -self.H:, -self.W:]
+                    true_sst = data[sst_idx, start + self.time + lead, -self.H :, -self.W :]
 
                     pred_sst = pred_sst * sst_scale
                     true_sst = true_sst * sst_scale
@@ -223,14 +223,14 @@ class Evaluator(BaseEval):
                     lead_mse_sum[lead] += val_loss.item()
 
                     # Append the predicted last frame for all channels to the test window
-                    next_frame = pred[:, :, -1:, :, :]   # [1, C, 1, H, W]
+                    next_frame = pred[:, :, -1:, :, :]  # [1, C, 1, H, W]
                     test = torch.cat((test, next_frame), dim=2)
 
         # Compute RMSE per lead and log
         lead_rmse = [0.0 for _ in range(horizon)]
         for lead in range(horizon):
             mse = lead_mse_sum[lead] / float(n_samples)
-            rmse = mse ** 0.5
+            rmse = mse**0.5
             lead_rmse[lead] = rmse
             self.logger.info("{} Lead RMSE : {}".format(lead, rmse))
 
@@ -340,7 +340,7 @@ class Evaluator(BaseEval):
                 if len(batch) != 3:
                     raise ValueError("Evaluation loader must return (inputs, outputs, indices).")
                 inputs, outputs, base_indices = batch
-                sample_indices = self._to_index_list(base_indices)
+                _ = self._to_index_list(base_indices)
                 inputs = inputs.to(self.device, non_blocking=True)
                 outputs = outputs.to(self.device, dtype=torch.float32, non_blocking=True)
 
@@ -612,9 +612,7 @@ class Evaluator(BaseEval):
         valid_point = lead_point_counts > 0
 
         if valid_lead.any():
-            per_lead_mse[valid_lead] = (
-                accum["per_lead_sse"].detach().cpu()[valid_lead] / lead_counts[valid_lead]
-            )
+            per_lead_mse[valid_lead] = accum["per_lead_sse"].detach().cpu()[valid_lead] / lead_counts[valid_lead]
         if valid_point.any():
             per_lead_point_mse[valid_point] = (
                 accum["per_lead_point_sse"].detach().cpu()[valid_point] / lead_point_counts[valid_point]
@@ -627,7 +625,7 @@ class Evaluator(BaseEval):
         per_lead_point_rmse = torch.sqrt(per_lead_point_mse)
 
         overall_mse = float((accum["overall_sse"] / numel_count).item())
-        overall_rmse = overall_mse ** 0.5
+        overall_rmse = overall_mse**0.5
         overall_mae = float((accum["overall_l1"] / numel_count).item())
 
         return {
@@ -726,9 +724,7 @@ class Evaluator(BaseEval):
         if desired_horizon <= initial_len or self.sequence_tensor is None:
             return targets, initial_len
 
-        available_extra = [
-            max(0, self.full_sequence_len - (idx + self.time + 1)) for idx in sample_indices
-        ]
+        available_extra = [max(0, self.full_sequence_len - (idx + self.time + 1)) for idx in sample_indices]
         if not available_extra:
             return targets, initial_len
 
@@ -878,9 +874,7 @@ class Evaluator(BaseEval):
                     return np.argsort(arr)[::-1]
         return None
 
-    def _draw_per_var_panel(
-        self, ax: Axes, metrics: dict[str, Any], title: str, order: np.ndarray | None
-    ) -> None:
+    def _draw_per_var_panel(self, ax: Axes, metrics: dict[str, Any], title: str, order: np.ndarray | None) -> None:
         per_var = metrics.get("per_variable", {})
         rmse = per_var.get("rmse")
         point_rmse = per_var.get("point_rmse")
@@ -1120,8 +1114,7 @@ class Evaluator(BaseEval):
             ax.legend(frameon=False, fontsize=8, loc="upper left")
 
             summary_text = (
-                f"min t{best_idx}: {point_rmse_arr[best_idx]:.3f}\n"
-                f"max t{worst_idx}: {point_rmse_arr[worst_idx]:.3f}"
+                f"min t{best_idx}: {point_rmse_arr[best_idx]:.3f}\nmax t{worst_idx}: {point_rmse_arr[worst_idx]:.3f}"
             )
             ax.text(
                 0.98,

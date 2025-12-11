@@ -19,3 +19,6 @@ uv.lock
 
 **/.ipynb_checkpoints/
 /outputs/**
+
+dump.py
+project_dump.txt

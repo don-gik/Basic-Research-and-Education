@@ -1,1 +1,1 @@
-from .data import AugmentedDataset, SequentialDataset, MultiStepSequentialDataset
+from .data import AugmentedDataset, MultiStepSequentialDataset, SequentialDataset
