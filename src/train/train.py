@@ -44,15 +44,7 @@ class Trainer(BaseTrainer):
         self.epochs = config.train.epochs
         self.log_freq = config.train.log_freq
         self.name = config.model.name
-        self.time = config.model.time
-        raw_horizon = getattr(config.data, "horizon", self.time)
-        try:
-            self.horizon = max(1, int(raw_horizon))
-        except (TypeError, ValueError):
-            self.logger.warning("Invalid config.data.horizon '%s'; defaulting to model time %d.", raw_horizon, self.time)
-            self.horizon = self.time
         self.var_cnt = config.data.var_cnt
-        self._horizon_warned = False
 
         self.device = device
 
@@ -65,7 +57,7 @@ class Trainer(BaseTrainer):
             self.logger.warning(f"Skipping to load model... {e}")
 
         criterion = nn.MSELoss()
-        optimizer = optim.AdamW(self.model.parameters(), lr=1e-5)
+        optimizer = optim.AdamW(self.model.parameters(), lr=1e-4, weight_decay=1e-2)
 
         dataset_size = len(self.dataset)
         subset_size = self.subset_size
@@ -82,8 +74,6 @@ class Trainer(BaseTrainer):
         for epoch in epochbar:
             self.logger.info(f"Starting epoch {epoch}...")
             running_loss: float = 0.0
-
-            self.model.train()
 
             random_indices: list[int] = np.random.choice(
                 np.arange(dataset_size), size=subset_size, replace=False
@@ -109,11 +99,14 @@ class Trainer(BaseTrainer):
                 inputs = inputs.to(self.device)
                 outputs = outputs.to(self.device, dtype=torch.float)
 
+                inputs = self._ensure_bcthw(inputs)
+                outputs = self._ensure_bcthw(outputs)
+
                 optimizer.zero_grad()
 
-                target_steps = self._target_horizon(outputs)
-                pred = self.model(inputs)
-                pred = self._rollout_predictions(inputs, pred, target_steps)
+                target_steps = outputs.size(2)
+                base_pred = self.model(inputs)
+                pred = self._rollout_predictions(inputs, base_pred, target_steps)
                 pred = pred[:, :, :target_steps, :, :]
                 target = outputs[:, :, :target_steps, :, :]
 
@@ -146,7 +139,6 @@ class Trainer(BaseTrainer):
             total=total_batches,
         )
 
-        self.model.eval()
         with torch.no_grad():
             full_loss = [0.0 for _ in range(self.var_cnt)]
             for i, batch in loaderbar:
@@ -154,19 +146,22 @@ class Trainer(BaseTrainer):
                 inputs = inputs.to(self.device)
                 outputs = outputs.to(self.device, dtype=torch.float)
 
-                target_steps = self._target_horizon(outputs)
-                pred = self.model(inputs)
-                pred = self._rollout_predictions(inputs, pred, target_steps)
+                inputs = self._ensure_bcthw(inputs)
+                outputs = self._ensure_bcthw(outputs)
+
+                target_steps = outputs.size(2)
+                base_pred = self.model(inputs)
+                pred = self._rollout_predictions(inputs, base_pred, target_steps)
                 pred = pred[:, :, :target_steps, :, :]
                 target = outputs[:, :, :target_steps, :, :]
 
-                for var in range(self.var_cnt):
+                for var in range(pred.size(1)):
                     val_loss = val_criterion(pred[:, var], target[:, var])
                     full_loss[var] += float(val_loss.item())
 
                 if i % self.log_freq == self.log_freq - 1:
                     self.logger.info("{}  {}".format(str(loaderbar), i))
-            for var in range(self.var_cnt):
+            for var in range(len(full_loss)):
                 self.logger.info("final_loss {} : {}".format(var, full_loss[var] / max(total_batches, 1)))
 
     def _save(self, epoch: int, name: str) -> None:
@@ -175,17 +170,20 @@ class Trainer(BaseTrainer):
         torch.save(self.model.state_dict(), os.path.join(self.path, name + str(epoch) + ".pt"))
         return
 
-    def _target_horizon(self, outputs: torch.Tensor) -> int:
-        target_steps = min(self.horizon, outputs.size(2))
-        if target_steps < self.horizon and not self._horizon_warned:
-            self.logger.warning(
-                "Requested horizon %d exceeds target length %d; trimming to %d.",
-                self.horizon,
-                outputs.size(2),
-                target_steps,
-            )
-            self._horizon_warned = True
-        return target_steps
+    def _ensure_bcthw(self, tensor: torch.Tensor) -> torch.Tensor:
+        """
+        Ensure tensor is shaped [B, C, T, H, W]; if input is [B, T, C, H, W] reorder.
+        """
+        if tensor.ndim != 5:
+            return tensor
+        b, d1, d2, h, w = tensor.shape
+        # Already channels-second (B, C, T, H, W)
+        if d1 == self.var_cnt:
+            return tensor
+        # Channels-third (B, T, C, H, W) -> permute
+        if d2 == self.var_cnt:
+            return tensor.permute(0, 2, 1, 3, 4).contiguous()
+        return tensor
 
     def _rollout_predictions(self, inputs: torch.Tensor, base_pred: torch.Tensor, horizon: int) -> torch.Tensor:
         if horizon <= 0:

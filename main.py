@@ -14,7 +14,7 @@ import pandas as pd
 import torch
 from torch.utils.data import Subset
 
-from src.dataset import AugmentedDataset, SequentialDataset
+from src.dataset import AugmentedDataset, MultiStepSequentialDataset
 from src.evaluate import Evaluator
 from src.preprocess import discover_grib_variables, save_normalized_tensor
 from src.train import Trainer
@@ -88,7 +88,14 @@ def run(config):
     data = torch.load(config.data.path)
     logger.info(f"Data shape : {data.shape}")
 
-    dataset = SequentialDataset(config.model.time, data, config.data.H, config.data.W)
+    horizon = getattr(config.data, "horizon", config.model.time)
+    dataset = MultiStepSequentialDataset(
+        x=data,
+        in_len=config.model.time,
+        out_len=int(horizon),
+        H=config.data.H,
+        W=config.data.W,
+    )
     train_idx = list(range(0, int(len(dataset) * config.train.train_size)))
     val_idx = list(range(int(len(dataset) * config.train.train_size), len(dataset)))
 
@@ -98,14 +105,11 @@ def run(config):
     train_augmented_dataset = AugmentedDataset(
         base_dataset=train_set, n_augment=config.data.augment, noise_std=config.data.std, noise_on_inputs=True
     )
-    val_augmented_dataset = AugmentedDataset(
-        base_dataset=val_set, n_augment=config.data.augment, noise_std=config.data.std, noise_on_inputs=True
-    )
     trainer = Trainer(
         config=config,
         device=torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"),
         train_dataset=train_augmented_dataset,
-        val_dataset=val_augmented_dataset,
+        val_dataset=val_set,
     )
 
     trainer.run()
@@ -122,7 +126,14 @@ def eval_run(config):
 
     data = torch.load(config.data.path)
     logger.info(f"Data shape : {data.shape}")
-    dataset = SequentialDataset(config.model.time, data, config.data.H, config.data.W)
+    horizon = getattr(config.data, "horizon", config.model.time)
+    dataset = MultiStepSequentialDataset(
+        x=data,
+        in_len=config.model.time,
+        out_len=int(horizon),
+        H=config.data.H,
+        W=config.data.W,
+    )
     train_idx = list(range(0, int(len(dataset) * config.train.train_size)))
     val_idx = list(range(int(len(dataset) * config.train.train_size), len(dataset)))
 

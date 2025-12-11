@@ -1,7 +1,8 @@
 model:
   time: 8
-  patch_size: 4
-  depth: 8
+  patch_size: 2
+  depth: 4
+  embed_size: 128
 
   name: "model-"
 
@@ -9,18 +10,19 @@ data:
   var_cnt: 10
   H: 40
   W: 200
+  horizon: 12
 
-  augment: 32
+  augment: 1
 
   path: "./data/processed/monthly_tensor.pt"
   stats_path: "./data/processed/monthly_tensor_stats.json"
 
 train:
   train_size: 0.9
-  batch_size: 32
+  batch_size: 8
   subset_size: 4096
 
-  load: "./model/2025-11-15/model-99.pt"
+  load: "./model/2025-11-25/model-99.pt"
   save: "./model/2025-11-25/"
 
   epochs: 100

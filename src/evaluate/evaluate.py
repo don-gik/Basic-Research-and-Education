@@ -98,7 +98,7 @@ class Evaluator(BaseEval):
 
         self.logger = logging.getLogger(__name__)
 
-        self.batch_size = 1
+        self.batch_size = config.train.batch_size
         self.subset_size = config.train.subset_size
 
         self.load = config.train.load
@@ -111,12 +111,22 @@ class Evaluator(BaseEval):
         self.log_freq = config.train.log_freq
         self.name = config.model.name
         self.time = config.model.time
-        lead_cfg = getattr(eval_cfg, "lead", self.time)
+        raw_horizon = getattr(config.data, "horizon", self.time)
+        try:
+            self.horizon = max(1, int(raw_horizon))
+        except (TypeError, ValueError):
+            self.logger.warning(
+                "Invalid config.data.horizon '%s'; defaulting to model time %d.",
+                raw_horizon,
+                self.time,
+            )
+            self.horizon = self.time
+        lead_cfg = getattr(eval_cfg, "lead", self.horizon)
         try:
             parsed_lead = int(lead_cfg)
         except (TypeError, ValueError):
-            parsed_lead = self.time
-        self.lead = max(1, parsed_lead)
+            parsed_lead = self.horizon
+        self.lead = max(1, min(parsed_lead, self.horizon))
         self.var_cnt = config.data.var_cnt
         self.channel_labels = self._var_labels(self.var_cnt)
         self.var_name_to_idx = {name: idx for idx, name in enumerate(self.channel_labels)}
@@ -152,23 +162,23 @@ class Evaluator(BaseEval):
         Compute an SST lead-time curve by iteratively predicting and
         comparing to ground truth, then plot RMSE per lead.
 
-        Also plots 3-month (3-step) running-mean RMSE of the scalar SST series.
-
         data: Tensor of shape [C, T, H, W]
         time_step: number of forecast leads
         n_samples: number of different start indices to average over
         """
+        # Move data and criterion outside loops
         data = data.to(self.device)
         val_criterion = nn.MSELoss()
         horizon = time_step or self.lead
         sst_idx: int = 0
         if self.sst_idx is not None:
             sst_idx = self.sst_idx
-
+            
         sst_scale = self._var_std_scalar(sst_idx, self.device, data.dtype)
 
         C, T_total, _, _ = data.shape
 
+        # Make sure we have enough time steps
         max_start = T_total - (self.time + horizon)
         if max_start <= 0:
             raise ValueError(
@@ -176,72 +186,53 @@ class Evaluator(BaseEval):
                 .format(T_total, self.time, horizon)
             )
 
-        # Monthly (per-lead) MSE sums
+        # Accumulate MSE per lead (we will take sqrt at the end for RMSE)
         lead_mse_sum = [0.0 for _ in range(horizon)]
-
-        # 3-month running-mean MSE sums (length horizon-2)
-        lead3_mse_sum = [0.0 for _ in range(max(0, horizon - 2))]
 
         self.model.eval()
         with torch.no_grad():
+            # Repeat experiment for several different start indices
             for sample_idx in range(n_samples):
+                # You can also use a fixed pattern (e.g. start = sample_idx)
                 start = random.randint(0, max_start)
 
+                # Initial window: [C, self.time, H, W] -> [1, C, self.time, H, W]
                 test = data[:, start:start + self.time, -self.H:, -self.W:].unsqueeze(0)
 
-                # Store scalar SST predictions/targets for 3-month averaging
-                pred_points: list[float] = []
-                true_points: list[float] = []
-
+                # Iterative 1-step-ahead prediction
                 for lead in range(horizon):
-                    inp = test[:, :, -self.time:, :, :]
-                    pred = self.model(inp)
+                    # Use only the last self.time time steps as input
+                    inp = test[:, :, -self.time:, :, :]  # [1, C, self.time, H, W]
+                    pred = self.model(inp)               # [1, C, T_out, H, W] (assumed)
 
-                    pred_sst = pred[0, sst_idx, -1, :, :]
+                    # Predicted SST at next step: last time index of SST channel
+                    pred_sst = pred[0, sst_idx, -1, :, :]     # [H, W]
+
+                    # True SST at (start + self.time + lead)
                     true_sst = data[sst_idx, start + self.time + lead, -self.H:, -self.W:]
 
                     pred_sst = pred_sst * sst_scale
                     true_sst = true_sst * sst_scale
 
+                    # Global "point" value: average over H, W -> 0-D
                     point_pred = torch.mean(torch.mean(pred_sst, dim=-1), dim=-1)
                     point_target = torch.mean(torch.mean(true_sst, dim=-1), dim=-1)
 
-                    # Monthly per-lead MSE
+                    # MSE between scalar predictions (this is just (pred - target)^2)
                     val_loss = val_criterion(point_pred, point_target)
                     lead_mse_sum[lead] += val_loss.item()
 
-                    # Collect scalars for 3-month running mean
-                    pred_points.append(float(point_pred.item()))
-                    true_points.append(float(point_target.item()))
-
-                    next_frame = pred[:, :, -1:, :, :]
+                    # Append the predicted last frame for all channels to the test window
+                    next_frame = pred[:, :, -1:, :, :]   # [1, C, 1, H, W]
                     test = torch.cat((test, next_frame), dim=2)
 
-                # 3-month running-mean MSE on scalar series
-                if horizon >= 3:
-                    for k in range(horizon - 2):
-                        avg_pred = (pred_points[k] + pred_points[k + 1] + pred_points[k + 2]) / 3.0
-                        avg_true = (true_points[k] + true_points[k + 1] + true_points[k + 2]) / 3.0
-                        lead3_mse_sum[k] += (avg_pred - avg_true) ** 2
-
-        # Compute RMSE per lead
+        # Compute RMSE per lead and log
         lead_rmse = [0.0 for _ in range(horizon)]
         for lead in range(horizon):
             mse = lead_mse_sum[lead] / float(n_samples)
             rmse = mse ** 0.5
             lead_rmse[lead] = rmse
             self.logger.info("{} Lead RMSE : {}".format(lead, rmse))
-
-        # Compute 3-month running-mean RMSE per lead-position
-        lead_rmse_3m: list[float] = []
-        if horizon >= 3:
-            lead_rmse_3m = [0.0 for _ in range(horizon - 2)]
-            for k in range(horizon - 2):
-                mse3 = lead3_mse_sum[k] / float(n_samples)
-                rmse3 = mse3 ** 0.5
-                lead_rmse_3m[k] = rmse3
-                # Centered at lead index k+1 (window k,k+1,k+2)
-                self.logger.info("{} Lead 3M-RMSE : {}".format(k + 1, rmse3))
 
         # Plot RMSE lead curve
         save_dir = Path(self.path) / "eval"
@@ -258,21 +249,8 @@ class Evaluator(BaseEval):
             linestyle="-",
             linewidth=1.0,
             markersize=3,
-            label="SST RMSE (monthly)",
+            label="SST RMSE",
         )
-
-        # Plot 3-month running-mean curve (aligned to center lead)
-        if horizon >= 3:
-            x3 = np.arange(horizon - 2) + 1
-            ax.plot(
-                x3,
-                lead_rmse_3m,
-                marker="o",
-                linestyle="--",
-                linewidth=1.0,
-                markersize=3,
-                label="SST RMSE (3-month avg)",
-            )
 
         ax.set_xticks(x)
         ax.set_xlabel("Lead index")
@@ -348,6 +326,7 @@ class Evaluator(BaseEval):
             "numel": 0,
             "samples": 0,
         }
+        train_like_totals = [0.0 for _ in range(self.var_cnt)]
 
         best_data: EvalSample | None = None
         worst_data: EvalSample | None = None
@@ -356,6 +335,7 @@ class Evaluator(BaseEval):
         worst_loss = float("-inf")
 
         with torch.no_grad():
+            val_criterion = nn.MSELoss(reduction="mean")
             for batch_idx, batch in loaderbar:
                 if len(batch) != 3:
                     raise ValueError("Evaluation loader must return (inputs, outputs, indices).")
@@ -364,14 +344,25 @@ class Evaluator(BaseEval):
                 inputs = inputs.to(self.device, non_blocking=True)
                 outputs = outputs.to(self.device, dtype=torch.float32, non_blocking=True)
 
-                pred = self.model(inputs)
-                scaled_outputs: Tensor = self._scale_by_std(outputs)
+                target_steps = outputs.size(2)
+                rollout_steps = max(target_steps, self.lead)
+                base_pred = self.model(inputs)
+                full_pred = self._rollout_predictions(inputs, base_pred, rollout_steps)
+
+                pred = full_pred[:, :, :target_steps, :, :]
+
+                # Train-like normalized loss (aligned to Trainer.evaluate)
+                for var in range(self.var_cnt):
+                    val_loss = val_criterion(pred[:, var], outputs[:, var])
+                    train_like_totals[var] += float(val_loss.item())
+
+                scaled_outputs: Tensor = self._scale_by_std(outputs[:, :, :target_steps, :, :])
                 scaled_pred: Tensor = self._scale_by_std(pred)
                 phys_diff = scaled_pred - scaled_outputs
                 phys_sq_error = phys_diff.pow(2)
                 phys_abs_error = phys_diff.abs()
 
-                norm_diff = pred - outputs
+                norm_diff = pred - outputs[:, :, :target_steps, :, :]
                 norm_sq_error = norm_diff.pow(2)
                 norm_abs_error = norm_diff.abs()
 
@@ -402,11 +393,10 @@ class Evaluator(BaseEval):
                 )
                 totals["point_count"] += batch_size
 
-                lead_targets_norm, lead_horizon = self._build_target_sequence(outputs, sample_indices, self.lead)
+                lead_horizon = min(self.lead, full_pred.size(2))
+                lead_targets_norm = outputs[:, :, :lead_horizon, :, :]
                 if lead_horizon > 0:
-                    lead_preds_norm = self._rollout_predictions(inputs, pred, lead_horizon)
-                    lead_preds_norm = lead_preds_norm[:, :, :lead_horizon, :, :]
-                    lead_targets_norm = lead_targets_norm[:, :, :lead_horizon, :, :]
+                    lead_preds_norm = full_pred[:, :, :lead_horizon, :, :]
 
                     lead_preds_phys = self._scale_by_std(lead_preds_norm)
                     lead_targets_phys = self._scale_by_std(lead_targets_norm)
@@ -431,14 +421,6 @@ class Evaluator(BaseEval):
                         height,
                         width,
                     )
-
-                    if lead_horizon < self.lead and not self.lead_trunc_warned:
-                        self.logger.warning(
-                            "Lead horizon truncated to %d (requested %d). Extend the sequence tensor for full evaluation.",
-                            lead_horizon,
-                            self.lead,
-                        )
-                        self.lead_trunc_warned = True
 
                 sample_var_loss = phys_sq_error.mean(dim=(2, 3, 4))
                 sample_avg_loss = sample_var_loss.mean(dim=1)
@@ -487,6 +469,12 @@ class Evaluator(BaseEval):
                     self._log_running_losses(accum_phys, totals, batch_idx + 1, total_batches)
 
         metrics = self._build_metrics(accum_phys, accum_norm, totals)
+        if total_batches > 0:
+            avg_train_like = [val / total_batches for val in train_like_totals]
+            self.logger.info(
+                "Train-like normalized MSE per var (avg) -> %s",
+                ", ".join(f"v{idx}:{val:.6f}" for idx, val in enumerate(avg_train_like)),
+            )
         self._log_metrics(metrics)
 
         samples = None

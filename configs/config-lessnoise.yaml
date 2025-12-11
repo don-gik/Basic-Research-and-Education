@@ -20,11 +20,11 @@ data:
 
 train:
   train_size: 0.9
-  batch_size: 16
+  batch_size: 8
   subset_size: 512
 
-  load: "./model/2025-11-25/model-64.pt"
-  save: "./model/2025-11-15/"
+  load: "./model/2025-11-25/model-40.pt"
+  save: "./model/2025-11-16/"
 
   epochs: 100
 
